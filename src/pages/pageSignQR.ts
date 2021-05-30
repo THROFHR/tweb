@@ -4,27 +4,29 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import apiManager from '../lib/mtproto/mtprotoworker';
-import Page from './page';
-import serverTimeManager from '../lib/mtproto/serverTimeManager';
-import { AuthAuthorization, AuthLoginToken } from '../layer';
+import Button from '../components/button';
+import getLanguageChangeButton from '../components/languageChangeButton';
+import { putPreloader } from '../components/misc';
+import App from '../config/app';
 import { bytesCmp, bytesToBase64 } from '../helpers/bytes';
 import { pause } from '../helpers/schedulers';
-import App from '../config/app';
-import Button from '../components/button';
-import { _i18n, i18n, LangPackKey } from '../lib/langPack';
+import { AuthAuthorization, AuthLoginToken } from '../layer';
 import appStateManager from '../lib/appManagers/appStateManager';
+import { i18n, LangPackKey, _i18n } from '../lib/langPack';
+import apiManager from '../lib/mtproto/mtprotoworker';
+import serverTimeManager from '../lib/mtproto/serverTimeManager';
 import rootScope from '../lib/rootScope';
-import { putPreloader } from '../components/misc';
-import getLanguageChangeButton from '../components/languageChangeButton';
+import Page from './page';
 
 const FETCH_INTERVAL = 3;
 
 let onFirstMount = async() => {
   const pageElement = page.pageEl;
   const imageDiv = pageElement.querySelector('.auth-image') as HTMLDivElement;
-
   let preloader = putPreloader(imageDiv, true);
+
+  const imageTextDiv = document.createElement('div');
+  imageDiv.parentElement.append(imageTextDiv);
 
   const inputWrapper = document.createElement('div');
   inputWrapper.classList.add('input-wrapper');
@@ -104,7 +106,7 @@ let onFirstMount = async() => {
 
         let encoded = bytesToBase64(loginToken.token);
         let url = "tg://login?token=" + encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/\=+$/, "");
-
+        imageTextDiv.innerText = url;
         const style = window.getComputedStyle(document.documentElement);
         const surfaceColor = style.getPropertyValue('--surface-color').trim();
         const textColor = style.getPropertyValue('--primary-text-color').trim();

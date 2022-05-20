@@ -5,102 +5,15 @@
  */
 
 // * Jolly Cobra's schedulers
-import { AnyToVoidFunction, NoneToVoidFunction } from "../types";
+import { NoneToVoidFunction } from "../types";
 
-//type Scheduler = typeof requestAnimationFrame | typeof onTickEnd | typeof runNow;
-
-export function debounce<F extends AnyToVoidFunction>(
-  fn: F,
-  ms: number,
-  shouldRunFirst = true,
-  shouldRunLast = true,
-) {
-  let waitingTimeout: number | null = null;
-
-  return (...args: Parameters<F>) => {
-    if(waitingTimeout) {
-      clearTimeout(waitingTimeout);
-      waitingTimeout = null;
-    } else if(shouldRunFirst) {
-      // @ts-ignore
-      fn(...args);
-    }
-
-    waitingTimeout = setTimeout(() => {
-      if(shouldRunLast) {
-        // @ts-ignore
-        fn(...args);
-      }
-
-      waitingTimeout = null;
-    }, ms) as any;
-  };
-}
-
-export function throttle<F extends AnyToVoidFunction>(
-  fn: F,
-  ms: number,
-  shouldRunFirst = true,
-) {
-  let interval: number | null = null;
-  let isPending: boolean;
-  let args: Parameters<F>;
-
-  return (..._args: Parameters<F>) => {
-    isPending = true;
-    args = _args;
-
-    if(!interval) {
-      if(shouldRunFirst) {
-        isPending = false;
-        // @ts-ignore
-        fn(...args);
-      }
-
-      interval = setInterval(() => {
-        if (!isPending) {
-          clearInterval(interval!);
-          interval = null;
-          return;
-        }
-
-        isPending = false;
-        // @ts-ignore
-        fn(...args);
-      }, ms) as any;
-    }
-  };
-}
-
-/* export function throttleWithRaf<F extends AnyToVoidFunction>(fn: F) {
-  return throttleWith(fastRaf, fn);
-}
-
+/*
 export function throttleWithTickEnd<F extends AnyToVoidFunction>(fn: F) {
   return throttleWith(onTickEnd, fn);
 }
 
 export function throttleWithNow<F extends AnyToVoidFunction>(fn: F) {
   return throttleWith(runNow, fn);
-}
-
-export function throttleWith<F extends AnyToVoidFunction>(schedulerFn: Scheduler, fn: F) {
-  let waiting = false;
-  let args: Parameters<F>;
-
-  return (..._args: Parameters<F>) => {
-    args = _args;
-
-    if (!waiting) {
-      waiting = true;
-
-      schedulerFn(() => {
-        waiting = false;
-        // @ts-ignore
-        fn(...args);
-      });
-    }
-  };
 }
 
 export function onTickEnd(cb: NoneToVoidFunction) {
@@ -110,10 +23,6 @@ export function onTickEnd(cb: NoneToVoidFunction) {
 function runNow(fn: NoneToVoidFunction) {
   fn();
 } */
-
-export const pause = (ms: number) => new Promise<void>((resolve) => {
-  setTimeout(resolve, ms);
-});
 
 let fastRafCallbacks: NoneToVoidFunction[] | undefined;
 export function fastRaf(callback: NoneToVoidFunction) {
@@ -128,6 +37,39 @@ export function fastRaf(callback: NoneToVoidFunction) {
   } else {
     fastRafCallbacks.push(callback);
   }
+}
+
+let fastRafConventionalCallbacks: NoneToVoidFunction[] | undefined, processing = false;
+export function fastRafConventional(callback: NoneToVoidFunction) {
+  if(!fastRafConventionalCallbacks) {
+    fastRafConventionalCallbacks = [callback];
+
+    requestAnimationFrame(() => {
+      processing = true;
+      for(let i = 0; i < fastRafConventionalCallbacks.length; ++i) {
+        fastRafConventionalCallbacks[i]();
+      }
+
+      fastRafConventionalCallbacks = undefined;
+      processing = false;
+    });
+  } else if(processing) {
+    callback();
+  } else {
+    fastRafConventionalCallbacks.push(callback);
+  }
+}
+
+let rafPromise: Promise<void>;
+export function fastRafPromise() {
+  if(rafPromise) return rafPromise;
+
+  rafPromise = new Promise<void>((resolve) => fastRaf(() => resolve()));
+  rafPromise.then(() => {
+    rafPromise = undefined;
+  });
+
+  return rafPromise;
 }
 
 export function doubleRaf() {

@@ -5,13 +5,14 @@
  */
 
 import type ListenerSetter from "../listenerSetter";
-import { isTouchSupported } from "../touchSupport";
+import { IS_TOUCH_SUPPORTED } from "../../environment/touchSupport";
+import simulateEvent from "./dispatchEvent";
 
-export const CLICK_EVENT_NAME: 'mousedown' | 'touchend' | 'click' = (isTouchSupported ? 'mousedown' : 'click') as any;
+export const CLICK_EVENT_NAME: 'mousedown' /* | 'touchend' */ | 'click' = (IS_TOUCH_SUPPORTED ? 'mousedown' : 'click') as any;
 export type AttachClickOptions = AddEventListenerOptions & Partial<{listenerSetter: ListenerSetter, touchMouseDown: true}>;
-export function attachClickEvent(elem: HTMLElement, callback: (e: TouchEvent | MouseEvent) => void, options: AttachClickOptions = {}) {
-  const add = options.listenerSetter ? options.listenerSetter.add.bind(options.listenerSetter, elem) : elem.addEventListener.bind(elem);
-  const remove = options.listenerSetter ? options.listenerSetter.removeManual.bind(options.listenerSetter, elem) : elem.removeEventListener.bind(elem);
+export function attachClickEvent(elem: HTMLElement | Window, callback: (e: /* TouchEvent |  */MouseEvent) => void, options: AttachClickOptions = {}) {
+  const add = options.listenerSetter ? options.listenerSetter.add(elem) : elem.addEventListener.bind(elem);
+  // const remove = options.listenerSetter ? options.listenerSetter.removeManual.bind(options.listenerSetter, elem) : elem.removeEventListener.bind(elem);
 
   options.touchMouseDown = true;
   /* if(options.touchMouseDown && CLICK_EVENT_NAME === 'touchend') {
@@ -44,10 +45,14 @@ export function attachClickEvent(elem: HTMLElement, callback: (e: TouchEvent | M
   add(CLICK_EVENT_NAME, callback, options);
 }
 
-export function detachClickEvent(elem: HTMLElement, callback: (e: TouchEvent | MouseEvent) => void, options?: AddEventListenerOptions) {
-  if(CLICK_EVENT_NAME === 'touchend') {
-    elem.removeEventListener('touchstart', callback, options);
-  } else {
+export function detachClickEvent(elem: HTMLElement, callback: (e: /* TouchEvent |  */MouseEvent) => void, options?: AddEventListenerOptions) {
+  // if(CLICK_EVENT_NAME === 'touchend') {
+  //   elem.removeEventListener('touchstart', callback, options);
+  // } else {
     elem.removeEventListener(CLICK_EVENT_NAME, callback, options);
-  }
+  // }
+}
+
+export function simulateClickEvent(elem: HTMLElement) {
+  simulateEvent(elem, CLICK_EVENT_NAME);
 }

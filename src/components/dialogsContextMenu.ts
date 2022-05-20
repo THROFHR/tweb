@@ -14,12 +14,17 @@ import PopupDeleteDialog from "./popups/deleteDialog";
 import { i18n } from "../lib/langPack";
 import findUpTag from "../helpers/dom/findUpTag";
 import appNotificationsManager from "../lib/appManagers/appNotificationsManager";
+import PopupPeer from "./popups/peer";
+import AppChatFoldersTab from "./sidebarLeft/tabs/chatFolders";
+import appSidebarLeft from "./sidebarLeft";
+import { toastNew } from "./toast";
+import PopupMute from "./popups/mute";
 
 export default class DialogsContextMenu {
   private element: HTMLElement;
   private buttons: (ButtonMenuItemOptions & {verify: () => boolean})[];
 
-  private selectedId: number;
+  private selectedId: PeerId;
   private filterId: number;
   private dialog: Dialog;
 
@@ -28,24 +33,18 @@ export default class DialogsContextMenu {
       icon: 'unread',
       text: 'MarkAsUnread',
       onClick: this.onUnreadClick,
-      verify: () => {
-        const isUnread = !!(this.dialog.pFlags?.unread_mark || this.dialog.unread_count);
-        return !isUnread;
-      }
+      verify: () => !appMessagesManager.isDialogUnread(this.dialog)
     }, {
       icon: 'readchats',
       text: 'MarkAsRead',
       onClick: this.onUnreadClick,
-      verify: () => { 
-        const isUnread = !!(this.dialog.pFlags?.unread_mark || this.dialog.unread_count);
-        return isUnread;
-      }
+      verify: () => appMessagesManager.isDialogUnread(this.dialog)
     }, {
       icon: 'pin',
       text: 'ChatList.Context.Pin',
       onClick: this.onPinClick,
       verify: () => {
-        const isPinned = this.filterId > 1 ? appMessagesManager.filtersStorage.filters[this.filterId].pinned_peers.includes(this.dialog.peerId) : !!this.dialog.pFlags?.pinned;
+        const isPinned = this.filterId > 1 ? appMessagesManager.filtersStorage.getFilter(this.filterId).pinnedPeerIds.includes(this.dialog.peerId) : !!this.dialog.pFlags?.pinned;
         return !isPinned;
       }
     }, {
@@ -53,7 +52,7 @@ export default class DialogsContextMenu {
       text: 'ChatList.Context.Unpin',
       onClick: this.onPinClick,
       verify: () => {
-        const isPinned = this.filterId > 1 ? appMessagesManager.filtersStorage.filters[this.filterId].pinned_peers.includes(this.dialog.peerId) : !!this.dialog.pFlags?.pinned;
+        const isPinned = this.filterId > 1 ? appMessagesManager.filtersStorage.getFilter(this.filterId).pinnedPeerIds.includes(this.dialog.peerId) : !!this.dialog.pFlags?.pinned;
         return isPinned;
       }
     }, {
@@ -101,15 +100,35 @@ export default class DialogsContextMenu {
   };
 
   private onPinClick = () => {
-    appMessagesManager.toggleDialogPin(this.selectedId, this.filterId);
+    appMessagesManager.toggleDialogPin(this.selectedId, this.filterId).catch(err => {
+      if(err.type === 'PINNED_DIALOGS_TOO_MUCH') {
+        if(this.filterId >= 1) {
+          toastNew({langPackKey: 'PinFolderLimitReached'});
+        } else {
+          new PopupPeer('pinned-dialogs-too-much', {
+            buttons: [{
+              langKey: 'OK',
+              isCancel: true
+            }, {
+              langKey: 'FiltersSetupPinAlert',
+              callback: () => {
+                new AppChatFoldersTab(appSidebarLeft).open();
+              }
+            }],
+            descriptionLangKey: 'PinToTopLimitReached2',
+            descriptionLangArgs: [i18n('Chats', [rootScope.config.pinned_dialogs_count_max])]
+          }).show();
+        }
+      }
+    });
   };
 
   private onUnmuteClick = () => {
-    appMessagesManager.mutePeer(this.selectedId, false);
+    appMessagesManager.togglePeerMute(this.selectedId, false);
   };
   
   private onMuteClick = () => {
-    appMessagesManager.mutePeer(this.selectedId, true);
+    new PopupMute(this.selectedId);
   };
 
   private onUnreadClick = () => {
@@ -125,7 +144,7 @@ export default class DialogsContextMenu {
   };
 
   private onDeleteClick = () => {
-    new PopupDeleteDialog(this.selectedId);
+    new PopupDeleteDialog(this.selectedId/* , 'delete' */);
   };
 
   onContextMenu = (e: MouseEvent | Touch) => {
@@ -150,7 +169,7 @@ export default class DialogsContextMenu {
 
     this.filterId = appDialogsManager.filterId;
 
-    this.selectedId = +li.dataset.peerId;
+    this.selectedId = li.dataset.peerId.toPeerId();
     this.dialog = appMessagesManager.getDialogOnly(this.selectedId);
 
     this.buttons.forEach(button => {

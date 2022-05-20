@@ -3,6 +3,7 @@ process.env.NODE_ENV = 'production';
 const path = require('path');
 const merge = require('webpack-merge');
 const common = require('./webpack.common.js');
+const keepAsset = require('./keepAsset.js');
 
 //const CompressionPlugin = require("compression-webpack-plugin");
 const WebpackOnBuildPlugin = require('on-build-webpack');
@@ -66,13 +67,16 @@ module.exports = merge(common, {
         files.forEach(file => {
           //console.log('to unlink 1:', file);
 
-          if(file.includes('.xml') 
-            || file.includes('.webmanifest') 
-            || file.includes('.wasm')
-            || file.includes('rlottie')
-            || file.includes('Worker.min.js')
-            || file.includes('recorder.min.js')
-            || file.includes('.hbs')) return;
+          if(keepAsset(file)) {
+            return;
+          }
+          // if(file.includes('.xml') 
+          //   || file.includes('.webmanifest') 
+          //   || file.includes('.wasm')
+          //   || file.includes('rlottie-wasm')
+          //   || file.includes('Worker.min.js')
+          //   || file.includes('recorder.min.js')
+          //   || file.includes('.hbs')) return;
 
           let p = path.resolve(buildDir + file);
           if(!newlyCreatedAssets[file] && ['.gz', '.js', '.ts', '.map', '.css', '.txt'].find(ext => file.endsWith(ext)) !== undefined) {

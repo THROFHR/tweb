@@ -10,8 +10,9 @@ import appPollsManager from "../../../lib/appManagers/appPollsManager";
 import { roundPercents } from "../../poll";
 import { RichTextProcessor } from "../../../lib/richtextprocessor";
 import appDialogsManager from "../../../lib/appManagers/appDialogsManager";
-import { ripple } from "../../ripple";
+import ripple from "../../ripple";
 import { i18n } from "../../../lib/langPack";
+import setInnerHTML from "../../../helpers/dom/setInnerHTML";
 
 export default class AppPollResultsTab extends SliderSuperTab {
   private resultsDiv: HTMLElement;
@@ -32,7 +33,7 @@ export default class AppPollResultsTab extends SliderSuperTab {
     this.setTitle(poll.poll.pFlags.quiz ? 'PollResults.Title.Quiz' : 'PollResults.Title.Poll');
 
     const title = document.createElement('h3');
-    title.innerHTML = poll.poll.rQuestion;
+    setInnerHTML(title, RichTextProcessor.wrapEmojiText(poll.poll.question));
 
     const percents = poll.results.results.map(v => v.voters / poll.results.total_voters * 100);
     roundPercents(percents);
@@ -50,7 +51,7 @@ export default class AppPollResultsTab extends SliderSuperTab {
       answerEl.classList.add('poll-results-answer');
 
       const answerTitle = document.createElement('div');
-      answerTitle.innerHTML = RichTextProcessor.wrapEmojiText(answer.text);
+      setInnerHTML(answerTitle, RichTextProcessor.wrapEmojiText(answer.text));
 
       const answerPercents = document.createElement('div');
       answerPercents.innerText = Math.round(percents[idx]) + '%';
@@ -77,7 +78,7 @@ export default class AppPollResultsTab extends SliderSuperTab {
         appPollsManager.getVotes(message, answer.option, offset, limit).then(votesList => {
           votesList.votes.forEach(vote => {
             const {dom} = appDialogsManager.addDialogNew({
-              dialog: vote.user_id,
+              dialog: vote.user_id.toPeerId(false),
               container: list,
               drawStatus: false,
               rippleEnabled: false, 

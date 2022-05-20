@@ -4,48 +4,69 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { AttachClickOptions, attachClickEvent, CLICK_EVENT_NAME } from "../helpers/dom/clickEvent";
 import ListenerSetter from "../helpers/listenerSetter";
-import { i18n, LangPackKey } from "../lib/langPack";
+import { FormatterArguments, i18n, LangPackKey } from "../lib/langPack";
 import CheckboxField from "./checkboxField";
 import { closeBtnMenu } from "./misc";
-import { ripple } from "./ripple";
+import ripple from "./ripple";
 
 export type ButtonMenuItemOptions = {
-  icon: string, 
-  text: LangPackKey, 
-  onClick: (e: MouseEvent | TouchEvent) => void, 
+  icon?: string, 
+  text?: LangPackKey, 
+  textArgs?: FormatterArguments,
+  regularText?: string, 
+  onClick: (e: MouseEvent | TouchEvent) => void | boolean, 
   element?: HTMLElement,
+  textElement?: HTMLElement,
   options?: AttachClickOptions,
   checkboxField?: CheckboxField,
+  noCheckboxClickListener?: boolean,
+  keepOpen?: boolean
   /* , cancelEvent?: true */
 };
 
 const ButtonMenuItem = (options: ButtonMenuItemOptions) => {
   if(options.element) return options.element;
 
-  const {icon, text, onClick} = options;
+  const {icon, text, onClick, checkboxField, noCheckboxClickListener} = options;
   const el = document.createElement('div');
-  el.className = 'btn-menu-item tgico-' + icon;
+  el.className = 'btn-menu-item rp-overflow' + (icon ? ' tgico-' + icon : '');
   ripple(el);
-  const t = i18n(text);
-  t.classList.add('btn-menu-item-text');
-  el.append(t);
 
-  if(options.checkboxField) {
-    el.append(options.checkboxField.label);
-    attachClickEvent(el, () => {
-      options.checkboxField.checked = !options.checkboxField.checked;
-    }, options.options);
+  let textElement = options.textElement;
+  if(!textElement) {
+    textElement = options.textElement = text ? i18n(text, options.textArgs) : document.createElement('span');
+    if(options.regularText) textElement.innerHTML = options.regularText;
   }
+  
+  textElement.classList.add('btn-menu-item-text');
+  el.append(textElement);
 
-  // * cancel keyboard close
-  attachClickEvent(el, CLICK_EVENT_NAME !== 'click' ? (e) => {
+  const keepOpen = !!checkboxField || !!options.keepOpen;
+
+  // * cancel mobile keyboard close
+  onClick && attachClickEvent(el, /* CLICK_EVENT_NAME !== 'click' || keepOpen ? */ (e) => {
     cancelEvent(e);
-    onClick(e);
-    closeBtnMenu();
-  } : onClick, options.options);
+    const result = onClick(e);
+
+    if(result === false) {
+      return;
+    }
+
+    if(!keepOpen) {
+      closeBtnMenu();
+    }
+
+    if(checkboxField && !noCheckboxClickListener/*  && result !== false */) {
+      checkboxField.checked = checkboxField.input.type === 'radio' ? true : !checkboxField.checked;
+    }
+  }/*  : onClick */, options.options);
+
+  if(checkboxField) {
+    el.append(checkboxField.label);
+  }
 
   return options.element = el;
 };

@@ -5,9 +5,9 @@
  */
 
 import appStateManager from "../lib/appManagers/appStateManager";
-import { getDeepProperty } from "../helpers/object";
-import { ripple } from "./ripple";
+import ripple from "./ripple";
 import { LangPackKey, _i18n } from "../lib/langPack";
+import getDeepProperty from "../helpers/object/getDeepProperty";
 
 export type CheckboxFieldOptions = {
   text?: LangPackKey,
@@ -45,6 +45,7 @@ export default class CheckboxField {
     }
 
     const input = this.input = document.createElement('input');
+    input.classList.add('checkbox-field-input');
     input.type = 'checkbox';
     if(options.name) {
       input.id = 'input-' + options.name;
@@ -137,6 +138,10 @@ export default class CheckboxField {
   }
 
   set checked(checked: boolean) {
+    /* if(this.checked === checked) {
+      return;
+    } */
+    
     this.setValueSilently(checked);
 
     const event = new Event('change', {bubbles: true, cancelable: true});

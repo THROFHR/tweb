@@ -5,80 +5,22 @@
  */
 
 import { MOUNT_CLASS_TO } from "../../config/debug";
-import { copy } from "../../helpers/object";
-import { InputMedia, MessageEntity } from "../../layer";
+import copy from "../../helpers/object/copy";
+import { InputMedia, Message, MessageEntity, MessageMedia, Poll, PollResults } from "../../layer";
 import { logger, LogTypes } from "../logger";
 import apiManager from "../mtproto/mtprotoworker";
 import { RichTextProcessor } from "../richtextprocessor";
 import rootScope from "../rootScope";
 import apiUpdatesManager from "./apiUpdatesManager";
+import appMessagesIdsManager from "./appMessagesIdsManager";
 import appMessagesManager from './appMessagesManager';
 import appPeersManager from './appPeersManager';
 import appUsersManager from "./appUsersManager";
 
-export type PollAnswer = {
-  _: 'pollAnswer',
-  text: string,
-  option: Uint8Array
-};
-
-export type PollAnswerVoters = {
-  _: 'pollAnswerVoters',
-  flags: number,
-  option: Uint8Array,
-  voters: number,
-
-  pFlags: Partial<{
-    chosen: true,
-    correct: true
-  }>
-};
-
-export type PollResult = {
-  _: 'pollAnswerVoters',
-  flags: number,
-  option: Uint8Array,
-  voters: number,
-
-  pFlags?: Partial<{chosen: true, correct: true}>
-};
-
-export type PollResults = {
-  _: 'pollResults',
-  flags: number,
-  results?: Array<PollResult>,
-  total_voters?: number,
-  recent_voters?: number[],
-  solution?: string,
-  solution_entities?: any[],
-
-  pFlags: Partial<{
-    min: true
-  }>,
-};
-
-export type Poll = {
-  _: 'poll',
-  question: string,
-  id: string,
-  answers: Array<PollAnswer>,
-  close_period?: number,
-  close_date?: number
-
-  pFlags?: Partial<{
-    closed: true,
-    public_voters: true,
-    multiple_choice: true,
-    quiz: true
-  }>,
-  rQuestion?: string,
-  rReply?: string,
-  chosenIndexes?: number[]
-};
-
 export class AppPollsManager {
   public polls: {[id: string]: Poll} = {};
   public results: {[id: string]: PollResults} = {};
+  public pollToMessages: {[id: string]: Set<string>} = {};
 
   private log = logger('POLLS', LogTypes.Error);
 
@@ -92,27 +34,33 @@ export class AppPollsManager {
           return;
         }
 
-        poll = this.savePoll(poll, update.results as any);
-        rootScope.broadcast('poll_update', {poll, results: update.results as any});
+        let results = update.results;
+        const ret = this.savePoll(poll, results as any);
+        poll = ret.poll;
+        results = ret.results;
+        
+        rootScope.dispatchEvent('poll_update', {poll, results: results as any});
       }
     });
   }
 
-  public savePoll(poll: Poll, results: PollResults) {
+  public savePoll(poll: Poll, results: PollResults, message?: Message.message) {
+    if(message) {
+      this.updatePollToMessage(message, true);
+    }
+
     const id = poll.id;
     if(this.polls[id]) {
       poll = Object.assign(this.polls[id], poll);
-      this.saveResults(poll, results);
-      return poll;
+      results = this.saveResults(poll, results);
+    } else {
+      this.polls[id] = poll;
+
+      poll.chosenIndexes = [];
+      results = this.saveResults(poll, results);
     }
 
-    this.polls[id] = poll;
-
-    poll.rQuestion = RichTextProcessor.wrapEmojiText(poll.question);
-    poll.rReply = RichTextProcessor.wrapEmojiText('📊') + ' ' + (poll.rQuestion || 'poll');
-    poll.chosenIndexes = [];
-    this.saveResults(poll, results);
-    return poll;
+    return {poll, results};
   }
 
   public saveResults(poll: Poll, results: PollResults) {
@@ -132,6 +80,8 @@ export class AppPollsManager {
         });
       }
     }
+
+    return results;
   }
 
   public getPoll(pollId: string): {poll: Poll, results: PollResults} {
@@ -161,6 +111,29 @@ export class AppPollsManager {
     };
   }
 
+  public updatePollToMessage(message: Message.message, add: boolean) {
+    const {id} = (message.media as MessageMedia.messageMediaPoll).poll;
+    let set = this.pollToMessages[id];
+    
+    if(!add && !set) {
+      return;
+    }
+
+    if(!set) {
+      set = this.pollToMessages[id] = new Set();
+    }
+
+    const key = message.peerId + '_' + message.mid;
+    if(add) set.add(key);
+    else set.delete(key);
+
+    if(!add && !set.size) {
+      delete this.polls[id];
+      delete this.results[id];
+      delete this.pollToMessages[id];
+    }
+  }
+
   public sendVote(message: any, optionIds: number[]): Promise<void> {
     const poll: Poll = message.media.poll;
 
@@ -181,7 +154,7 @@ export class AppPollsManager {
 
     return apiManager.invokeApi('messages.sendVote', {
       peer: inputPeer,
-      msg_id: appMessagesManager.getServerMessageId(message.mid),
+      msg_id: appMessagesIdsManager.getServerMessageId(message.mid),
       options
     }).then(updates => {
       this.log('sendVote updates:', updates);
@@ -194,7 +167,7 @@ export class AppPollsManager {
 
     return apiManager.invokeApi('messages.getPollResults', {
       peer: inputPeer,
-      msg_id: appMessagesManager.getServerMessageId(message.mid)
+      msg_id: appMessagesIdsManager.getServerMessageId(message.mid)
     }).then(updates => {
       apiUpdatesManager.processUpdateMessage(updates);
       this.log('getResults updates:', updates);
@@ -204,7 +177,7 @@ export class AppPollsManager {
   public getVotes(message: any, option?: Uint8Array, offset?: string, limit = 20) {
     return apiManager.invokeApi('messages.getPollVotes', {
       peer: appPeersManager.getInputPeerById(message.peerId),
-      id: appMessagesManager.getServerMessageId(message.mid),
+      id: appMessagesIdsManager.getServerMessageId(message.mid),
       option,
       offset,
       limit

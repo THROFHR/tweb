@@ -8,14 +8,18 @@ import Button from '../components/button';
 import getLanguageChangeButton from '../components/languageChangeButton';
 import { putPreloader } from '../components/misc';
 import App from '../config/app';
-import { bytesCmp, bytesToBase64 } from '../helpers/bytes';
-import { pause } from '../helpers/schedulers';
+import bytesCmp from '../helpers/bytes/bytesCmp';
+import bytesToBase64 from '../helpers/bytes/bytesToBase64';
+import fixBase64String from '../helpers/fixBase64String';
+import pause from '../helpers/schedulers/pause';
 import { AuthAuthorization, AuthLoginToken } from '../layer';
 import appStateManager from '../lib/appManagers/appStateManager';
 import { i18n, LangPackKey, _i18n } from '../lib/langPack';
+import type { ApiError } from '../lib/mtproto/apiManager';
 import apiManager from '../lib/mtproto/mtprotoworker';
 import serverTimeManager from '../lib/mtproto/serverTimeManager';
 import rootScope from '../lib/rootScope';
+import type { DcId } from '../types';
 import Page from './page';
 
 const FETCH_INTERVAL = 3;
@@ -23,6 +27,7 @@ const FETCH_INTERVAL = 3;
 let onFirstMount = async() => {
   const pageElement = page.pageEl;
   const imageDiv = pageElement.querySelector('.auth-image') as HTMLDivElement;
+
   let preloader = putPreloader(imageDiv, true);
 
   const imageTextDiv = document.createElement('div');
@@ -65,9 +70,9 @@ let onFirstMount = async() => {
   rootScope.addEventListener('user_auth', () => {
     stop = true;
     cachedPromise = null;
-  }, true);
+  }, {once: true});
   
-  let options: {dcId?: number, ignoreErrors: true} = {ignoreErrors: true};
+  let options: {dcId?: DcId, ignoreErrors: true} = {ignoreErrors: true};
   let prevToken: Uint8Array | number[];
 
   const iterate = async(isLoop: boolean) => {
@@ -80,7 +85,7 @@ let onFirstMount = async() => {
   
       if(loginToken._ === 'auth.loginTokenMigrateTo') {
         if(!options.dcId) {
-          options.dcId = loginToken.dc_id;
+          options.dcId = loginToken.dc_id as DcId;
           apiManager.setBaseDcId(loginToken.dc_id);
           //continue;
         }
@@ -92,7 +97,7 @@ let onFirstMount = async() => {
 
       if(loginToken._ === 'auth.loginTokenSuccess') {
         const authorization = loginToken.authorization as any as AuthAuthorization.authAuthorization;
-        apiManager.setUserAuth(authorization.user.id);
+        apiManager.setUser(authorization.user);
         import('./pageIm').then(m => m.default.mount());
         return true;
       }
@@ -105,7 +110,7 @@ let onFirstMount = async() => {
         prevToken = loginToken.token;
 
         let encoded = bytesToBase64(loginToken.token);
-        let url = "tg://login?token=" + encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/\=+$/, "");
+        let url = "tg://login?token=" + fixBase64String(encoded, true);
         imageTextDiv.innerText = url;
         const style = window.getComputedStyle(document.documentElement);
         const surfaceColor = style.getPropertyValue('--surface-color').trim();
@@ -201,10 +206,10 @@ let onFirstMount = async() => {
         await pause(diff > FETCH_INTERVAL ? 1e3 * FETCH_INTERVAL : 1e3 * diff | 0);
       }
     } catch(err) {
-      switch(err.type) {
+      switch((err as ApiError).type) {
         case 'SESSION_PASSWORD_NEEDED':
           console.warn('pageSignQR: SESSION_PASSWORD_NEEDED');
-          err.handled = true;
+          (err as ApiError).handled = true;
           import('./pagePassword').then(m => m.default.mount());
           stop = true;
           cachedPromise = null;

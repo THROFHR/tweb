@@ -24,34 +24,33 @@ import appPhotosManager from './appPhotosManager';
 import appProfileManager from './appProfileManager';
 import appStickersManager from './appStickersManager';
 import appWebPagesManager from './appWebPagesManager';
-import PopupNewMedia from '../../components/popups/newMedia';
+import PopupNewMedia, { getCurrentNewMediaPopup } from '../../components/popups/newMedia';
 import MarkupTooltip from '../../components/chat/markupTooltip';
-import { isTouchSupported } from '../../helpers/touchSupport';
+import { IS_TOUCH_SUPPORTED } from '../../environment/touchSupport';
 import appPollsManager from './appPollsManager';
 import SetTransition from '../../components/singleTransition';
 import ChatDragAndDrop from '../../components/chat/dragAndDrop';
-import { debounce, pause, doubleRaf } from '../../helpers/schedulers';
-import lottieLoader from '../lottieLoader';
+import { doubleRaf } from '../../helpers/schedulers';
+import lottieLoader from '../rlottie/lottieLoader';
 import useHeavyAnimationCheck, { dispatchHeavyAnimationEvent } from '../../hooks/useHeavyAnimationCheck';
 import appDraftsManager from './appDraftsManager';
 import serverTimeManager from '../mtproto/serverTimeManager';
-import sessionStorage from '../sessionStorage';
+import stateStorage from '../stateStorage';
 import appDownloadManager from './appDownloadManager';
-import { AppStateManager } from './appStateManager';
+import appStateManager, { AppStateManager, STATE_INIT } from './appStateManager';
 import { MOUNT_CLASS_TO } from '../../config/debug';
 import appNavigationController from '../../components/appNavigationController';
 import appNotificationsManager from './appNotificationsManager';
 import AppPrivateSearchTab from '../../components/sidebarRight/tabs/search';
-import { i18n, LangPackKey } from '../langPack';
-import { SendMessageAction } from '../../layer';
+import I18n, { i18n, join, LangPackKey } from '../langPack';
+import { ChatInvite, Dialog, Message, SendMessageAction } from '../../layer';
 import { hslaStringToHex } from '../../helpers/color';
-import { copy, getObjectKeysAndSort } from '../../helpers/object';
 import { getFilesFromEvent } from '../../helpers/files';
 import PeerTitle from '../../components/peerTitle';
 import PopupPeer from '../../components/popups/peer';
 import { SliceEnd } from '../../helpers/slicedArray';
 import blurActiveElement from '../../helpers/dom/blurActiveElement';
-import { cancelEvent } from '../../helpers/dom/cancelEvent';
+import cancelEvent from '../../helpers/dom/cancelEvent';
 import disableTransition from '../../helpers/dom/disableTransition';
 import placeCaretAtEnd from '../../helpers/dom/placeCaretAtEnd';
 import replaceContent from '../../helpers/dom/replaceContent';
@@ -59,17 +58,64 @@ import whichChild from '../../helpers/dom/whichChild';
 import appEmojiManager from './appEmojiManager';
 import PopupElement from '../../components/popups';
 import singleInstance from '../mtproto/singleInstance';
+import PopupStickers from '../../components/popups/stickers';
+import PopupJoinChatInvite from '../../components/popups/joinChatInvite';
+import { toast, toastNew } from '../../components/toast';
+import debounce from '../../helpers/schedulers/debounce';
+import pause from '../../helpers/schedulers/pause';
+import appMessagesIdsManager from './appMessagesIdsManager';
+import { InternalLink, InternalLinkTypeMap, INTERNAL_LINK_TYPE } from './internalLink';
+import RichTextProcessor from '../richtextprocessor';
+import MEDIA_MIME_TYPES_SUPPORTED from '../../environment/mediaMimeTypesSupport';
+import { NULL_PEER_ID } from '../mtproto/mtproto_config';
+import telegramMeWebManager from '../mtproto/telegramMeWebManager';
+import { ONE_DAY } from '../../helpers/date';
+import appGroupCallsManager, { GroupCallId, MyGroupCall } from './appGroupCallsManager';
+import TopbarCall from '../../components/topbarCall';
+import confirmationPopup from '../../components/confirmationPopup';
+import IS_GROUP_CALL_SUPPORTED from '../../environment/groupCallSupport';
+import appAvatarsManager from './appAvatarsManager';
+import appCallsManager from './appCallsManager';
+import IS_CALL_SUPPORTED from '../../environment/callSupport';
+import { CallType } from '../calls/types';
+import { Modify, SendMessageEmojiInteractionData } from '../../types';
+import htmlToSpan from '../../helpers/dom/htmlToSpan';
+import getVisibleRect from '../../helpers/dom/getVisibleRect';
+import { simulateClickEvent } from '../../helpers/dom/clickEvent';
+import appReactionsManager from './appReactionsManager';
+import PopupCall from '../../components/call';
+import copy from '../../helpers/object/copy';
+import getObjectKeysAndSort from '../../helpers/object/getObjectKeysAndSort';
+import type GroupCallInstance from '../calls/groupCallInstance';
+import type CallInstance from '../calls/callInstance';
+import numberThousandSplitter from '../../helpers/number/numberThousandSplitter';
+import ChatBackgroundPatternRenderer from '../../components/chat/patternRenderer';
+import { IS_FIREFOX } from '../../environment/userAgent';
+import compareVersion from '../../helpers/compareVersion';
 
 //console.log('appImManager included33!');
 
 appSidebarLeft; // just to include
 
 export const CHAT_ANIMATION_GROUP = 'chat';
-const FOCUS_EVENT_NAME = isTouchSupported ? 'touchstart' : 'mousemove';
+const FOCUS_EVENT_NAME = IS_TOUCH_SUPPORTED ? 'touchstart' : 'mousemove';
 
 export type ChatSavedPosition = {
   mids: number[], 
   top: number
+};
+
+export type ChatSetPeerOptions = {
+  peerId?: PeerId, 
+  lastMsgId?: number, 
+  threadId?: number,
+  startParam?: string
+};
+
+export type ChatSetInnerPeerOptions = Modify<ChatSetPeerOptions, {
+  peerId: PeerId
+}> & {
+  type?: ChatType
 };
 
 export class AppImManager {
@@ -90,8 +136,12 @@ export class AppImManager {
   private chatsSelectTabDebounced: () => void;
   
   public markupTooltip: MarkupTooltip;
-  private themeColorElem: Element;
-  private backgroundPromises: {[slug: string]: Promise<string>} = {};
+  private backgroundPromises: {[slug: string]: Promise<string>};
+  
+  private topbarCall: TopbarCall;
+  public emojiAnimationContainer: HTMLDivElement;
+
+  private lastBackgroundUrl: string;
 
   get myId() {
     return rootScope.myId;
@@ -102,9 +152,18 @@ export class AppImManager {
   }
 
   constructor() {
-    apiUpdatesManager.attach();
+    apiUpdatesManager.attach(I18n.lastRequestedLangCode);
+    appNotificationsManager.start();
 
     this.log = logger('IM', LogTypes.Log | LogTypes.Warn | LogTypes.Debug | LogTypes.Error);
+
+    this.backgroundPromises = {};
+    STATE_INIT.settings.themes.forEach(theme => {
+      if(theme.background.slug) {
+        const url = 'assets/img/' + theme.background.slug + '.svg' + (IS_FIREFOX ? '?1' : '');
+        this.backgroundPromises[theme.background.slug] = Promise.resolve(url);
+      }
+    });
 
     this.selectTab(0);
     
@@ -114,7 +173,7 @@ export class AppImManager {
       this.offline = rootScope.idle.isIDLE = true;
       this.updateStatus();
       clearInterval(this.updateStatusInterval);
-      rootScope.broadcast('idle', rootScope.idle.isIDLE);
+      rootScope.dispatchEvent('idle', rootScope.idle.isIDLE);
       
       window.addEventListener('focus', () => {
         this.offline = rootScope.idle.isIDLE = false;
@@ -124,7 +183,7 @@ export class AppImManager {
         // в обратном порядке
         animationIntersector.checkAnimations(false);
 
-        rootScope.broadcast('idle', rootScope.idle.isIDLE);
+        rootScope.dispatchEvent('idle', rootScope.idle.isIDLE);
       }, {once: true});
     });
 
@@ -134,12 +193,16 @@ export class AppImManager {
       this.updateStatus();
 
       this.offline = rootScope.idle.isIDLE = false;
-      rootScope.broadcast('idle', rootScope.idle.isIDLE);
+      rootScope.dispatchEvent('idle', rootScope.idle.isIDLE);
     }, {once: true, passive: true});
 
     this.chatsContainer = document.createElement('div');
     this.chatsContainer.classList.add('chats-container', 'tabs-container');
     this.chatsContainer.dataset.animation = 'navigation';
+
+    this.emojiAnimationContainer = document.createElement('div');
+    this.emojiAnimationContainer.classList.add('emoji-animation-container');
+    this.appendEmojiAnimationContainer(mediaSizes.activeScreen);
 
     this.columnEl.append(this.chatsContainer);
     
@@ -150,7 +213,7 @@ export class AppImManager {
     //window.addEventListener('hashchange', this.onHashChange);
 
     this.setSettings();
-    rootScope.on('settings_updated', this.setSettings);
+    rootScope.addEventListener('settings_updated', this.setSettings);
 
     useHeavyAnimationCheck(() => {
       animationIntersector.setOnlyOnePlayableGroup('lock');
@@ -160,7 +223,15 @@ export class AppImManager {
       animationIntersector.checkAnimations(false);
     });
 
-    this.applyCurrentTheme();
+    if(IS_FIREFOX && appStateManager.oldVersion && compareVersion(appStateManager.oldVersion, '1.4.3') === -1) {
+      this.deleteFilesIterative((response) => {
+        return response.headers.get('Content-Type') === 'image/svg+xml';
+      }).then(() => {
+        this.applyCurrentTheme();
+      });
+    } else {
+      this.applyCurrentTheme();
+    }
 
     // * fix simultaneous opened both sidebars, can happen when floating sidebar is opened with left sidebar
     mediaSizes.addEventListener('changeScreen', (from, to) => {
@@ -168,22 +239,85 @@ export class AppImManager {
         && document.body.classList.contains(RIGHT_COLUMN_ACTIVE_CLASSNAME)) {
         appSidebarRight.toggleSidebar(false);
       }
+
+      this.appendEmojiAnimationContainer(to);
     });
 
-    rootScope.on('history_focus', (e) => {
-      const {peerId, mid} = e;
-      this.setInnerPeer(peerId, mid);
+    mediaSizes.addEventListener('resize', () => {
+      // const perf = performance.now();
+      const rect = this.chatsContainer.getBoundingClientRect();
+      ChatBackgroundPatternRenderer.resizeInstances(rect.width, rect.height).then(() => {
+        // this.log.warn('resize bg time:', performance.now() - perf);
+        // for(const chat of this.chats) {
+        //   if(chat.renderDarkPattern) {
+        //     chat.renderDarkPattern();
+        //   }
+        // }
+      });
     });
 
-    rootScope.on('peer_changing', (chat) => {
+    rootScope.addEventListener('history_focus', (e) => {
+      let {peerId, threadId, mid, startParam} = e;
+      if(threadId) threadId = appMessagesIdsManager.generateMessageId(threadId);
+      if(mid) mid = appMessagesIdsManager.generateMessageId(mid); // because mid can come from notification, i.e. server message id
+      
+      this.setInnerPeer({
+        peerId, 
+        lastMsgId: mid, 
+        type: threadId ? 'discussion' : undefined, 
+        threadId,
+        startParam
+      });
+    });
+
+    rootScope.addEventListener('peer_changing', (chat) => {
       this.saveChatPosition(chat);
     });
 
-    rootScope.on('theme_change', () => {
+    rootScope.addEventListener('theme_change', () => {
       this.applyCurrentTheme();
     });
 
-    rootScope.on('instance_deactivated', () => {
+    rootScope.addEventListener('choosing_sticker', (choosing) => {
+      this.setChoosingStickerTyping(!choosing);
+    });
+
+    rootScope.addEventListener('peer_typings', ({peerId, typings}) => {
+      const chat = this.chat;
+      if(
+        !chat || 
+        chat.peerId !== peerId || 
+        rootScope.overlaysActive || (
+          mediaSizes.activeScreen === ScreenSize.mobile && 
+          this.tabId !== 1
+        )
+      ) {
+        return;
+      }
+
+      const typing = typings.find(typing => typing.action._ === 'sendMessageEmojiInteraction');
+      if(typing?.action?._ === 'sendMessageEmojiInteraction') {
+        const action = typing.action;
+        const bubble = chat.bubbles.bubbles[appMessagesIdsManager.generateMessageId(typing.action.msg_id)];
+        if(bubble && bubble.classList.contains('emoji-big') && bubble.classList.contains('sticker') && getVisibleRect(bubble, chat.bubbles.scrollable.container)) {
+          const stickerWrapper: HTMLElement = bubble.querySelector('.media-sticker-wrapper:not(.bubble-hover-reaction-sticker):not(.reaction-sticker)');
+
+          const data: SendMessageEmojiInteractionData = JSON.parse(action.interaction.data);
+          data.a.forEach(a => {
+            setTimeout(() => {
+              simulateClickEvent(stickerWrapper);
+            }, a.t * 1000);
+          });
+          
+          appMessagesManager.setTyping(peerId, {
+            _: 'sendMessageEmojiInteractionSeen',
+            emoticon: action.emoticon
+          });
+        }
+      }
+    });
+
+    rootScope.addEventListener('instance_deactivated', () => {
       const popup = new PopupElement('popup-instance-deactivated', undefined, {overlayClosable: true});
       const c = document.createElement('div');
       c.classList.add('instance-deactivated-container');
@@ -201,94 +335,583 @@ export class AppImManager {
 
       document.body.classList.add('deactivated');
 
-      (popup as any).onClose = () => {
+      popup.addEventListener('close', () => {
         document.body.classList.add('deactivated-backwards');
 
-        singleInstance.reset();
-        singleInstance.checkInstance(false);
+        singleInstance.activateInstance();
 
         setTimeout(() => {
           document.body.classList.remove('deactivated', 'deactivated-backwards');
         }, 333);
-      };
+      });
 
       popup.show();
     });
 
-    sessionStorage.get('chatPositions').then((c) => {
-      sessionStorage.setToCache('chatPositions', c || {});
+    // remove scroll listener when setting chat to tray
+    rootScope.addEventListener('chat_changing', ({to}) => {
+      this.toggleChatGradientAnimation(to);
     });
 
-    (window as any).showMaskedAlert = (element: HTMLAnchorElement, e: Event) => {
-      cancelEvent(null);
+    rootScope.addEventListener('service_notification', (update) => {
+      confirmationPopup({
+        button: {langKey: 'OK', isCancel: true},
+        description: RichTextProcessor.wrapRichText(update.message)
+      });
+    });
 
-      const href = element.href;
+    stateStorage.get('chatPositions').then((c) => {
+      stateStorage.setToCache('chatPositions', c || {});
+    });
 
-      const a = element.cloneNode(true) as HTMLAnchorElement;
-      a.className = 'anchor-url';
-      a.innerText = href;
-      a.removeAttribute('onclick');
+    if(IS_CALL_SUPPORTED || IS_GROUP_CALL_SUPPORTED) {
+      this.topbarCall = new TopbarCall(appGroupCallsManager, appPeersManager, appChatsManager, appAvatarsManager, appCallsManager);
+    }
 
-      new PopupPeer('popup-masked-url', {
-        titleLangKey: 'OpenUrlTitle',
-        descriptionLangKey: 'OpenUrlAlert2',
-        descriptionLangArgs: [a],
-        buttons: [{
-          langKey: 'Open',
-          callback: () => {
-            a.click();
-          },
-        }]
-      }).show();
+    if(IS_CALL_SUPPORTED) {
+      rootScope.addEventListener('call_instance', ({instance/* , hasCurrent */}) => {
+        // if(hasCurrent) {
+          // return;
+        // }
+        
+        const popup = new PopupCall({
+          appCallsManager,
+          appAvatarsManager,
+          appPeersManager,
+          instance
+        });
 
-      return false;
+        instance.addEventListener('acceptCallOverride', () => {
+          return this.discardCurrentCall(instance.interlocutorUserId.toPeerId(), undefined, instance)
+          .then(() => {
+            rootScope.dispatchEvent('call_accepting', instance);
+            return true;
+          })
+          .catch(() => false);
+        });
+
+        popup.addEventListener('close', () => {
+          const currentCall = appCallsManager.currentCall;
+          if(currentCall && currentCall !== instance && !instance.wasTryingToJoin) {
+            instance.hangUp('phoneCallDiscardReasonBusy');
+          }
+        }, {once: true});
+
+        popup.show();
+      });
+
+      rootScope.addEventListener('call_incompatible', (userId) => {
+        toastNew({
+          langPackKey: 'VoipPeerIncompatible', 
+          langPackArguments: [
+            new PeerTitle({peerId: userId.toPeerId()}).element
+          ]
+        });
+      });
+    }
+
+    // ! do not remove this line 
+    // ! instance can be deactivated before the UI starts, because it waits in background for RAF that is delayed
+    singleInstance.activateInstance();
+
+    const setAuthorized = () => {
+      telegramMeWebManager.setAuthorized(true);
     };
 
-    (window as any).execBotCommand = (element: HTMLAnchorElement, e: Event) => {
-      cancelEvent(null);
+    setInterval(setAuthorized, ONE_DAY);
+    setAuthorized();
 
-      const href = element.href;
-      const params = this.parseUriParams(href);
-      if(!params) {
+    this.addAnchorListener<{}>({
+      name: 'showMaskedAlert', 
+      callback: (params, element) => {
+        const href = element.href;
+
+        const a = element.cloneNode(true) as HTMLAnchorElement;
+        a.className = 'anchor-url';
+        a.innerText = href;
+        a.removeAttribute('onclick');
+
+        new PopupPeer('popup-masked-url', {
+          titleLangKey: 'OpenUrlTitle',
+          descriptionLangKey: 'OpenUrlAlert2',
+          descriptionLangArgs: [a],
+          buttons: [{
+            langKey: 'Open',
+            callback: () => {
+              a.click();
+            },
+          }]
+        }).show();
+      }
+    });
+
+    this.addAnchorListener<{uriParams: {command: string, bot: string}}>({
+      name: 'execBotCommand', 
+      callback: ({uriParams}) => {
+        const {command, bot} = uriParams;
+
+        /* const promise = bot ? this.openUsername(bot).then(() => this.chat.peerId) : Promise.resolve(this.chat.peerId);
+        promise.then(peerId => {
+          appMessagesManager.sendText(peerId, '/' + command);
+        }); */
+
+        appMessagesManager.sendText(this.chat.peerId, '/' + command + (bot ? '@' + bot : ''));
+
+        //console.log(command, bot);
+      }
+    });
+
+    this.addAnchorListener<{uriParams: {hashtag: string}}>({
+      name: 'searchByHashtag', 
+      callback: ({uriParams}) => {
+        const {hashtag} = uriParams;
+        if(!hashtag) {
+          return;
+        }
+
+        this.chat.initSearch('#' + hashtag + ' ');
+      }
+    });
+
+    this.addAnchorListener<{pathnameParams: ['addstickers', string]}>({
+      name: 'addstickers', 
+      callback: ({pathnameParams}) => {
+        const link: InternalLink = {
+          _: INTERNAL_LINK_TYPE.STICKER_SET,
+          set: pathnameParams[1]
+        };
+
+        this.processInternalLink(link);
+      }
+    });
+
+    // Support old t.me/joinchat/asd and new t.me/+asd
+    this.addAnchorListener<{pathnameParams: ['joinchat', string]}>({
+      name: 'joinchat', 
+      callback: ({pathnameParams}) => {
+        const link: InternalLink = {
+          _: INTERNAL_LINK_TYPE.JOIN_CHAT,
+          invite: pathnameParams[1] || decodeURIComponent(pathnameParams[0]).slice(1)
+        };
+
+        this.processInternalLink(link);
+      }
+    });
+
+    if(IS_GROUP_CALL_SUPPORTED) {
+      this.addAnchorListener<{
+        uriParams: Omit<InternalLink.InternalLinkVoiceChat, '_'>
+      }>({
+        name: 'voicechat',
+        protocol: 'tg',
+        callback: ({uriParams}) => {
+          const link = this.makeLink(INTERNAL_LINK_TYPE.VOICE_CHAT, uriParams);
+          this.processInternalLink(link);
+        }
+      });
+    }
+
+    this.addAnchorListener<{
+    //   pathnameParams: ['c', string, string],
+    //   uriParams: {thread?: number}
+    // } | {
+    //   pathnameParams: [string, string?],
+    //   uriParams: {comment?: number}
+      pathnameParams: ['c', string, string] | [string, string?],
+      uriParams: {thread?: string, comment?: string} | {comment?: string, start?: string}
+    }>({
+      name: 'im',
+      callback: async({pathnameParams, uriParams}) => {
+        let link: InternalLink;
+        if(RichTextProcessor.PHONE_NUMBER_REG_EXP.test(pathnameParams[0])) {
+          link = {
+            _: INTERNAL_LINK_TYPE.USER_PHONE_NUMBER,
+            phone: pathnameParams[0].slice(1)
+          };
+        } else if(pathnameParams[0] === 'c') {
+          link = {
+            _: INTERNAL_LINK_TYPE.PRIVATE_POST,
+            channel: pathnameParams[1],
+            post: pathnameParams[2],
+            thread: 'thread' in uriParams && uriParams.thread,
+            comment: uriParams.comment
+          };
+        } else {
+          link = {
+            _: INTERNAL_LINK_TYPE.MESSAGE,
+            domain: pathnameParams[0],
+            post: pathnameParams[1],
+            comment: uriParams.comment,
+            start: 'start' in uriParams ? uriParams.start : undefined
+          };
+        }
+
+        this.processInternalLink(link);
+      }
+    });
+
+    this.addAnchorListener<{
+      uriParams: {
+        domain: string,
+
+        // telegrampassport
+        scope?: string,
+        nonce?: string,
+        payload?: string,
+        bot_id?: string,
+        public_key?: string,
+        callback_url?: string,
+
+        // regular
+        start?: string,
+        startgroup?: string,
+        game?: string,
+        voicechat?: string,
+        post?: string,
+        thread?: string,
+        comment?: string,
+        phone?: string
+      }
+    }>({
+      name: 'resolve',
+      protocol: 'tg',
+      callback: ({uriParams}) => {
+        let link: InternalLink;
+        if(uriParams.phone) {
+          link = this.makeLink(INTERNAL_LINK_TYPE.USER_PHONE_NUMBER, uriParams as Required<typeof uriParams>);
+        } else if(uriParams.domain === 'telegrampassport') {
+
+        } else {
+          link = this.makeLink(INTERNAL_LINK_TYPE.MESSAGE, uriParams);
+        }
+
+        this.processInternalLink(link);
+      }
+    });
+
+    this.addAnchorListener<{
+      uriParams: {
+        channel: string,
+        post: string,
+        thread?: string,
+        comment?: string
+      }
+    }>({
+      name: 'privatepost',
+      protocol: 'tg',
+      callback: ({uriParams}) => {
+        const link = this.makeLink(INTERNAL_LINK_TYPE.PRIVATE_POST, uriParams);
+        this.processInternalLink(link);
+      }
+    });
+
+    this.addAnchorListener<{
+      uriParams: {
+        set: string
+      }
+    }>({
+      name: 'addstickers',
+      protocol: 'tg',
+      callback: ({uriParams}) => {
+        const link = this.makeLink(INTERNAL_LINK_TYPE.STICKER_SET, uriParams);
+        this.processInternalLink(link);
+      }
+    });
+
+    ['joinchat' as const, 'join' as const].forEach(name => {
+      this.addAnchorListener<{
+        uriParams: {
+          invite: string
+        }
+      }>({
+        name,
+        protocol: 'tg',
+        callback: ({uriParams}) => {
+          const link = this.makeLink(INTERNAL_LINK_TYPE.JOIN_CHAT, uriParams);
+          this.processInternalLink(link);
+        }
+      });
+    });
+
+    this.onHashChange();
+    this.attachKeydownListener();
+  }
+
+  private deleteFilesIterative(callback: (response: Response) => boolean) {
+    return appDownloadManager.cacheStorage.timeoutOperation((cache) => {
+      const perf = performance.now();
+      return cache.keys().then((requests) => {
+        const promises = requests.map((request) => {
+          return cache.match(request).then((response) => {
+            return callback(response);
+          });
+        });
+
+        return Promise.all(promises).then((values) => {
+          values.map((isBad, idx) => {
+            if(!isBad) {
+              return;
+            }
+
+            const request = requests[idx];
+            return cache.delete(request);
+          });
+
+          return Promise.all(values.filter(Boolean));
+        });
+      }).then(() => {
+        this.log('deleted files', performance.now() - perf);
+      });
+    });
+  }
+
+  private toggleChatGradientAnimation(activatingChat: Chat) {
+    this.chats.forEach(chat => {
+      if(chat.gradientRenderer) {
+        chat.gradientRenderer.scrollAnimate(rootScope.settings.animationsEnabled && chat === activatingChat);
+      }
+    });
+  }
+
+  private appendEmojiAnimationContainer(screen: ScreenSize) {
+    const appendTo = screen === ScreenSize.mobile ? this.columnEl : document.body;
+    if(this.emojiAnimationContainer.parentElement !== appendTo) {
+      appendTo.append(this.emojiAnimationContainer)
+    }
+  }
+
+  private attachKeydownListener() {
+    const IGNORE_KEYS = new Set(['PageUp', 'PageDown', 'Meta', 'Control']);
+    const onKeyDown = (e: KeyboardEvent) => {
+      const key = e.key;
+      if(rootScope.isOverlayActive || IGNORE_KEYS.has(key)) return;
+      
+      const target = e.target as HTMLElement;
+      
+      //if(target.tagName === 'INPUT') return;
+      
+      //this.log('onkeydown', e, document.activeElement);
+
+      const chat = this.chat;
+
+      if(e.code === 'KeyC' && (e.ctrlKey || e.metaKey) && target.tagName !== 'INPUT') {
+        return;
+      } else if(e.altKey && (key === 'ArrowUp' || key === 'ArrowDown')) {
+        const folder = appMessagesManager.dialogsStorage.getFolderDialogs(rootScope.filterId, true);
+        let nextDialog: Dialog.dialog;
+        if(!rootScope.peerId) {
+          if(key === 'ArrowDown') {
+            nextDialog = folder[0];
+          }
+        } else {
+          const idx = folder.findIndex(dialog => dialog.peerId === rootScope.peerId);
+          if(idx !== -1) {
+            const nextIndex = key === 'ArrowUp' ? idx - 1 : idx + 1;
+            nextDialog = folder[nextIndex];
+          }
+        }
+        
+        if(nextDialog) {
+          this.setPeer({peerId: nextDialog.peerId});
+        }
+      } else if(key === 'ArrowUp') {
+        if(!chat.input.editMsgId && chat.input.isInputEmpty()) {
+          const historyStorage = appMessagesManager.getHistoryStorage(chat.peerId, chat.threadId);
+          const slice = historyStorage.history.slice;
+          if(slice.isEnd(SliceEnd.Bottom) && slice.length) {
+            let goodMid: number;
+            for(const mid of slice) {
+              const message = chat.getMessage(mid);
+              const good = this.myId === chat.peerId ? message.fromId === this.myId : message.pFlags.out;
+
+              if(good) {
+                if(appMessagesManager.canEditMessage(chat.getMessage(mid), 'text')) {
+                  goodMid = mid;
+                  break;
+                }
+
+                // * this check will allow editing only last message
+                //break;
+              }
+            }
+  
+            if(goodMid) {
+              chat.input.initMessageEditing(goodMid);
+              cancelEvent(e); // * prevent from scrolling
+            }
+          }
+        } else {
+          return;
+        }
+      } else if(key === 'ArrowDown') {
         return;
       }
+      
+      if(
+        chat?.input?.messageInput && 
+        e.target !== chat.input.messageInput && 
+        target.tagName !== 'INPUT' && 
+        !target.hasAttribute('contenteditable') && 
+        !IS_TOUCH_SUPPORTED && 
+        (!mediaSizes.isMobile || this.tabId === 1) && 
+        !chat.selection.isSelecting && 
+        !chat.input.recording
+      ) {
+        chat.input.messageInput.focus();
+        placeCaretAtEnd(chat.input.messageInput);
 
-      const {command, bot} = params;
-
-      /* const promise = bot ? this.openUsername(bot).then(() => this.chat.peerId) : Promise.resolve(this.chat.peerId);
-      promise.then(peerId => {
-        appMessagesManager.sendText(peerId, '/' + command);
-      }); */
-
-      appMessagesManager.sendText(this.chat.peerId, '/' + command + (bot ? '@' + bot : ''));
-
-      //console.log(command, bot);
-
-      return false;
+        // clone and dispatch same event to new input. it is needed for sending message if input was blurred
+        const newEvent = new KeyboardEvent(e.type, e);
+        chat.input.messageInput.dispatchEvent(newEvent);
+      }
     };
+    
+    document.body.addEventListener('keydown', onKeyDown);
+  }
 
-    (window as any).searchByHashtag = (element: HTMLAnchorElement, e: Event) => {
+  private makeLink<T extends INTERNAL_LINK_TYPE>(type: T, uriParams: Omit<InternalLinkTypeMap[T], '_'>) {
+    return {
+      _: type,
+      ...uriParams
+    } as any as InternalLinkTypeMap[T];
+  }
+
+  public async processInternalLink(link: InternalLink) {
+    switch(link?._) {
+      case INTERNAL_LINK_TYPE.MESSAGE: {
+        const postId = link.post ? appMessagesIdsManager.generateMessageId(+link.post) : undefined;
+        const commentId = link.comment ? appMessagesIdsManager.generateMessageId(+link.comment) : undefined;
+
+        this.openUsername({
+          userName: link.domain, 
+          lastMsgId: postId, 
+          commentId,
+          startParam: link.start
+        });
+        break;
+      }
+
+      case INTERNAL_LINK_TYPE.PRIVATE_POST: {
+        const chatId = link.channel.toChatId();
+        const peerId = chatId.toPeerId(true);
+
+        const chat = appChatsManager.getChat(chatId);
+        if(chat.deleted) {
+          try {
+            await appChatsManager.resolveChannel(chatId);
+          } catch(err) {
+            toastNew({langPackKey: 'LinkNotFound'});
+            throw err;
+          }
+        }
+
+        const postId = appMessagesIdsManager.generateMessageId(+link.post);
+        const threadId = link.thread ? appMessagesIdsManager.generateMessageId(+link.thread) : undefined;
+
+        if(threadId) this.openThread(peerId, postId, threadId);
+        else this.setInnerPeer({
+          peerId,
+          lastMsgId: postId,
+          threadId
+        });
+        break;
+      }
+
+      case INTERNAL_LINK_TYPE.STICKER_SET: {
+        new PopupStickers({id: link.set}).show();
+        break;
+      }
+
+      case INTERNAL_LINK_TYPE.JOIN_CHAT: {
+        apiManager.invokeApi('messages.checkChatInvite', {
+          hash: link.invite
+        }).then(chatInvite => {
+          if((chatInvite as ChatInvite.chatInvitePeek).chat) {
+            appChatsManager.saveApiChat((chatInvite as ChatInvite.chatInvitePeek).chat, true);
+          }
+
+          // console.log(chatInvite);
+
+          if(chatInvite._ === 'chatInviteAlready' ||
+            chatInvite._ === 'chatInvitePeek'/*  && chatInvite.expires > tsNow(true) */) {
+            this.setInnerPeer({
+              peerId: chatInvite.chat.id.toPeerId(true)
+            });
+            return;
+          }
+
+          new PopupJoinChatInvite(link.invite, chatInvite).show();
+        }, (err) => {
+          if(err.type === 'INVITE_HASH_EXPIRED') {
+            toast(i18n('InviteExpired'));
+          }
+        });
+        break;
+      }
+
+      case INTERNAL_LINK_TYPE.VOICE_CHAT: {
+        if(IS_GROUP_CALL_SUPPORTED) {
+          this.joinGroupCall(link.chat_id.toPeerId(true), link.id);
+        }
+        
+        break;
+      }
+
+      case INTERNAL_LINK_TYPE.USER_PHONE_NUMBER: {
+        appUsersManager.resolvePhone(link.phone).then(user => {
+          this.setInnerPeer({
+            peerId: user.id.toPeerId(false)
+          });
+        }).catch(err => {
+          if(err.type === 'PHONE_NOT_OCCUPIED') {
+            toastNew({langPackKey: 'Alert.UserDoesntExists'});
+          }
+        });
+
+        break;
+      }
+
+      default: {
+        this.log.warn('Not supported internal link:', link);
+        break;
+      }
+    }
+  }
+
+  public openUrl(url: string) {
+    const {url: wrappedUrl, onclick} = RichTextProcessor.wrapUrl(url);
+    const a = document.createElement('a');
+    a.href = wrappedUrl;
+    
+    (window as any)[onclick](a);
+  }
+
+  private addAnchorListener<Params extends {pathnameParams?: any, uriParams?: any}>(options: {
+    name: 'showMaskedAlert' | 'execBotCommand' | 'searchByHashtag' | 'addstickers' | 'im' |
+          'resolve' | 'privatepost' | 'addstickers' | 'voicechat' | 'joinchat' | 'join', 
+    protocol?: 'tg',
+    callback: (params: Params, element?: HTMLAnchorElement) => boolean | any, 
+    noPathnameParams?: boolean,
+    noUriParams?: boolean
+  }) {
+    (window as any)[(options.protocol ? options.protocol + '_' : '') + options.name] = (element?: HTMLAnchorElement/* , e: Event */) => {
       cancelEvent(null);
 
       const href = element.href;
-      const params = this.parseUriParams(href);
-      if(!params) {
-        return;
-      }
+      let pathnameParams: any[];
+      let uriParams: any;
 
-      const {hashtag} = params;
-      this.chat.initSearch('#' + hashtag + ' ');
+      if(!options.noPathnameParams) pathnameParams = new URL(element.href).pathname.split('/').slice(1);
+      if(!options.noUriParams) uriParams = this.parseUriParams(href);
 
-      return false;
+      const res = options.callback({pathnameParams, uriParams} as Params, element);
+      return res === undefined ? res : false;
     };
   }
 
   private parseUriParams(uri: string, splitted = uri.split('?')) {
-    if(!splitted[1]) {
-      return;
-    }
-
     const params: any = {};
+    if(!splitted[1]) return params;
     splitted[1].split('&').forEach(item => {
       params[item.split('=')[0]] = decodeURIComponent(item.split('=')[1]);
     });
@@ -304,19 +927,36 @@ export class AppImManager {
 
     this.log('hashchange', hash, splitted[0], params);
 
+    if(params.tgaddr) {
+      appNavigationController.replaceState();
+      const {onclick} = RichTextProcessor.wrapUrl(params.tgaddr);
+      if(onclick) {
+        const a = document.createElement('a');
+        a.href = params.tgaddr;
+        (window as any)[onclick](a);
+      }
+      return;
+    }
+
     switch(splitted[0]) {
       case '#/im': {
-        const p = params.p;
-        let postId = params.post !== undefined ? appMessagesManager.generateMessageId(+params.post) : undefined;
+        const p: string = params.p;
+        let postId = params.post !== undefined ? appMessagesIdsManager.generateMessageId(+params.post) : undefined;
 
         switch(p[0]) {
           case '@': {
-            this.openUsername(p, postId);
+            this.openUsername({
+              userName: p, 
+              lastMsgId: postId
+            });
             break;
           }
 
           default: { // peerId
-            this.setInnerPeer(postId ? -+p : +p, postId);
+            this.setInnerPeer({
+              peerId: postId ? p.toPeerId(true) : p.toPeerId(), 
+              lastMsgId: postId
+            });
             break;
           }
         }
@@ -327,31 +967,201 @@ export class AppImManager {
     //location.hash = '';
   };
 
-  public openUsername(username: string, msgId?: number) {
-    return appUsersManager.resolveUsername(username).then(peer => {
+  public openUsername(options: {
+    userName: string, 
+    lastMsgId?: number, 
+    threadId?: number, 
+    commentId?: number,
+    startParam?: string
+  }) {
+    const {userName, lastMsgId, threadId, commentId, startParam} = options;
+    return appUsersManager.resolveUsername(userName).then(peer => {
       const isUser = peer._ === 'user';
-      const peerId = isUser ? peer.id : -peer.id;
+      const peerId = peer.id.toPeerId(!isUser);
 
-      return this.setInnerPeer(peerId, msgId);
+      if(threadId) {
+        return this.openThread(peerId, lastMsgId, threadId);
+      } else if(commentId) {
+        return this.openComment(peerId, lastMsgId, commentId);
+      }
+      
+      return this.setInnerPeer({
+        peerId,
+        lastMsgId,
+        startParam: startParam
+      });
+    }, (err) => {
+      if(err.type === 'USERNAME_NOT_OCCUPIED') {
+        toastNew({langPackKey: 'NoUsernameFound'});
+      } else if(err.type === 'USERNAME_INVALID') {
+        toastNew({langPackKey: 'Alert.UserDoesntExists'});
+      }
     });
   }
 
-  public setCurrentBackground(broadcastEvent = false) {
+  /**
+   * Opens thread when peerId of discussion group is known
+   */
+  public openThread(peerId: PeerId, lastMsgId: number, threadId: number) {
+    return appMessagesManager.wrapSingleMessage(peerId, threadId).then(() => {
+      const message: Message = appMessagesManager.getMessageByPeer(peerId, threadId);
+      if(message._ === 'messageEmpty') {
+        lastMsgId = undefined;
+      } else {
+        appMessagesManager.generateThreadServiceStartMessage(message);
+      }
+
+      return this.setInnerPeer({
+        peerId,
+        lastMsgId,
+        threadId,
+        type: 'discussion'
+      });
+    });
+  }
+
+  /**
+   * Opens comment directly from original channel
+   */
+  public openComment(peerId: PeerId, msgId: number, commentId: number) {
+    return appMessagesManager.getDiscussionMessage(peerId, msgId).then(message => {
+      return this.openThread(message.peerId, commentId, message.mid);
+    });
+  }
+
+  public async callUser(userId: UserId, type: CallType) {
+    const call = appCallsManager.getCallByUserId(userId);
+    if(call) {
+      return;
+    }
+    
+    const userFull = await appProfileManager.getProfile(userId);
+    if(userFull.pFlags.phone_calls_private) {
+      confirmationPopup({
+        descriptionLangKey: 'Call.PrivacyErrorMessage',
+        descriptionLangArgs: [new PeerTitle({peerId: userId.toPeerId()}).element],
+        button: {
+          langKey: 'OK',
+          isCancel: true
+        }
+      });
+
+      return;
+    }
+
+    await this.discardCurrentCall(userId.toPeerId());
+
+    appCallsManager.startCallInternal(userId, type === 'video');
+  }
+
+  private discardCurrentCall(toPeerId: PeerId, ignoreGroupCall?: GroupCallInstance, ignoreCall?: CallInstance) {
+    if(appGroupCallsManager.groupCall && appGroupCallsManager.groupCall !== ignoreGroupCall) return this.discardGroupCallConfirmation(toPeerId);
+    else if(appCallsManager.currentCall && appCallsManager.currentCall !== ignoreCall) return this.discardCallConfirmation(toPeerId);
+    else return Promise.resolve();
+  }
+
+  private async discardCallConfirmation(toPeerId: PeerId) {
+    const currentCall = appCallsManager.currentCall;
+    if(currentCall) {
+      await confirmationPopup({
+        titleLangKey: 'Call.Confirm.Discard.Call.Header',
+        descriptionLangKey: toPeerId.isUser() ? 'Call.Confirm.Discard.Call.ToCall.Text' : 'Call.Confirm.Discard.Call.ToVoice.Text',
+        descriptionLangArgs: [
+          new PeerTitle({peerId: currentCall.interlocutorUserId.toPeerId(false)}).element, 
+          new PeerTitle({peerId: toPeerId}).element
+        ],
+        button: {
+          langKey: 'OK'
+        }
+      });
+
+      if(!currentCall.isClosing) {
+        await currentCall.hangUp('phoneCallDiscardReasonDisconnect');
+      }
+    }
+  }
+
+  private async discardGroupCallConfirmation(toPeerId: PeerId) {
+    const currentGroupCall = appGroupCallsManager.groupCall;
+    if(currentGroupCall) {
+      await confirmationPopup({
+        titleLangKey: 'Call.Confirm.Discard.Voice.Header',
+        descriptionLangKey: toPeerId.isUser() ? 'Call.Confirm.Discard.Voice.ToCall.Text' : 'Call.Confirm.Discard.Voice.ToVoice.Text',
+        descriptionLangArgs: [
+          new PeerTitle({peerId: currentGroupCall.chatId.toPeerId(true)}).element, 
+          new PeerTitle({peerId: toPeerId}).element
+        ],
+        button: {
+          langKey: 'OK'
+        }
+      });
+
+      if(appGroupCallsManager.groupCall === currentGroupCall) {
+        await currentGroupCall.hangUp();
+      }
+    }
+  }
+
+  public async joinGroupCall(peerId: PeerId, groupCallId?: GroupCallId) {
+    const chatId = peerId.toChatId();
+    const hasRights = appChatsManager.hasRights(chatId, 'manage_call');
+    const next = async() => {
+      const chatFull = await appProfileManager.getChatFull(chatId);
+      let call: MyGroupCall;
+      if(!chatFull.call) {
+        if(!hasRights) {
+          return;
+        }
+  
+        call = await appGroupCallsManager.createGroupCall(chatId);
+      } else {
+        call = appGroupCallsManager.saveGroupCall(chatFull.call, chatId);
+      }
+  
+      appGroupCallsManager.joinGroupCall(chatId, call.id, true, false);
+    };
+
+    if(groupCallId) {
+      const groupCall = await appGroupCallsManager.getGroupCallFull(groupCallId);
+      if(groupCall._ === 'groupCallDiscarded') {
+        if(!hasRights) {
+          toastNew({
+            langPackKey: 'VoiceChat.Chat.Ended'
+          });
+
+          return;
+        }
+
+        await confirmationPopup({
+          descriptionLangKey: 'VoiceChat.Chat.StartNew',
+          button: {
+            langKey: 'VoiceChat.Chat.StartNew.OK'
+          }
+        });
+      }
+    }
+
+    await this.discardCurrentCall(peerId);
+
+    next();
+  };
+
+  public setCurrentBackground(broadcastEvent = false): ReturnType<AppImManager['setBackground']> {
     const theme = rootScope.getTheme();
 
-    if(theme.background.type === 'image' || (theme.background.type === 'default' && theme.background.slug)) {
+    if(theme.background.slug) {
       const defaultTheme = AppStateManager.STATE_INIT.settings.themes.find(t => t.name === theme.name);
-      const isDefaultBackground = theme.background.blur === defaultTheme.background.blur && 
-        theme.background.slug === defaultTheme.background.slug;
+      // const isDefaultBackground = theme.background.blur === defaultTheme.background.blur && 
+        // theme.background.slug === defaultTheme.background.slug;
 
-      if(!isDefaultBackground) {
+      // if(!isDefaultBackground) {
         return this.getBackground(theme.background.slug).then((url) => {
           return this.setBackground(url, broadcastEvent);
         }, () => { // * if NO_ENTRY_FOUND
           theme.background = copy(defaultTheme.background); // * reset background
-          return this.setBackground('', true);
+          return this.setCurrentBackground(true);
         });
-      }
+      // }
     }
     
     return this.setBackground('', broadcastEvent);
@@ -365,10 +1175,11 @@ export class AppImManager {
   }
 
   public setBackground(url: string, broadcastEvent = true): Promise<void> {
+    this.lastBackgroundUrl = url;
     const promises = this.chats.map(chat => chat.setBackground(url));
     return promises[promises.length - 1].then(() => {
       if(broadcastEvent) {
-        rootScope.broadcast('background_change');
+        rootScope.dispatchEvent('background_change');
       }
     });
   }
@@ -381,14 +1192,15 @@ export class AppImManager {
     //const bubble = chat.bubbles.getBubbleByPoint('top');
     //if(bubble) {
       //const top = bubble.getBoundingClientRect().top;
-      const top = chat.bubbles.scrollable.scrollTop;
-
+      const chatBubbles = chat.bubbles;
       const key = chat.peerId + (chat.threadId ? '_' + chat.threadId : '');
-
-      const chatPositions = sessionStorage.getFromCache('chatPositions');
-      if(!(chat.bubbles.scrollable.getDistanceToEnd() <= 16 && chat.bubbles.scrollable.loadedAll.bottom) && Object.keys(chat.bubbles.bubbles).length) {
+      const chatPositions = stateStorage.getFromCache('chatPositions');
+      if(!(chatBubbles.scrollable.getDistanceToEnd() <= 16 && chatBubbles.scrollable.loadedAll.bottom) && chatBubbles.getRenderedLength()) {
+        chatBubbles.sliceViewport(true);
+        const top = chatBubbles.scrollable.scrollTop;
+        
         const position = {
-          mids: getObjectKeysAndSort(chat.bubbles.bubbles, 'desc'),
+          mids: getObjectKeysAndSort(chatBubbles.bubbles, 'desc').filter(mid => !chatBubbles.skippedMids.has(mid)),
           top
         };
 
@@ -401,7 +1213,7 @@ export class AppImManager {
         this.log('deleted chat position');
       }
 
-      sessionStorage.set({chatPositions}, true);
+      stateStorage.set({chatPositions}, true);
     //}
   }
 
@@ -411,7 +1223,7 @@ export class AppImManager {
     }
     
     const key = chat.peerId + (chat.threadId ? '_' + chat.threadId : '');
-    const cache = sessionStorage.getFromCache('chatPositions');
+    const cache = stateStorage.getFromCache('chatPositions');
     return cache && cache[key];
   }
 
@@ -425,17 +1237,8 @@ export class AppImManager {
       document.documentElement.style.removeProperty('--message-highlightning-color');
     }
 
-    let themeColor = '#ffffff';
-    if(hsla) {
-      themeColor = hslaStringToHex(hsla);
-    }
-
-    if(this.themeColorElem === undefined) {
-      this.themeColorElem = document.head.querySelector('[name="theme-color"]') as Element || null;
-    }
-
-    if(this.themeColorElem) {
-      this.themeColorElem.setAttribute('content', themeColor);
+    if(!IS_TOUCH_SUPPORTED && hsla) {
+      rootScope.themeColor = hslaStringToHex(hsla);
     }
   }
 
@@ -473,6 +1276,10 @@ export class AppImManager {
     for(const chat of this.chats) {
       chat.setAutoDownloadMedia();
     }
+    
+    I18n.setTimeFormat(rootScope.settings.timeFormat);
+
+    this.toggleChatGradientAnimation(this.chat);
   };
 
   // * не могу использовать тут TransitionSlider, так как мне нужен отрисованный блок рядом 
@@ -501,7 +1308,7 @@ export class AppImManager {
         appNavigationController.pushItem({
           type: 'chat', 
           onPop: (canAnimate) => {
-            this.setPeer(0, undefined, canAnimate);
+            this.setPeer({}, canAnimate);
             blurActiveElement();
           }
         });
@@ -515,91 +1322,7 @@ export class AppImManager {
   private init() {
     document.addEventListener('paste', this.onDocumentPaste, true);
     
-    const IGNORE_KEYS = new Set(['PageUp', 'PageDown', 'Meta', 'Control']);
-    const onKeyDown = (e: KeyboardEvent) => {
-      if(rootScope.overlayIsActive || IGNORE_KEYS.has(e.key)) return;
-      
-      const target = e.target as HTMLElement;
-      
-      //if(target.tagName === 'INPUT') return;
-      
-      //this.log('onkeydown', e, document.activeElement);
-
-      const chat = this.chat;
-
-      if(e.code === 'KeyC' && (e.ctrlKey || e.metaKey) && target.tagName !== 'INPUT') {
-        return;
-      } else if(e.code === 'ArrowUp') {
-        if(!chat.input.editMsgId && chat.input.isInputEmpty()) {
-          const historyStorage = appMessagesManager.getHistoryStorage(chat.peerId, chat.threadId);
-          const slice = historyStorage.history.slice;
-          if(slice.isEnd(SliceEnd.Bottom) && slice.length) {
-            let goodMid: number;
-            for(const mid of slice) {
-              const message = chat.getMessage(mid);
-              const good = this.myId === chat.peerId ? message.fromId === this.myId : message.pFlags.out;
-
-              if(good) {
-                if(appMessagesManager.canEditMessage(chat.getMessage(mid), 'text')) {
-                  goodMid = mid;
-                  break;
-                }
-
-                // * this check will allow editing only last message
-                //break;
-              }
-            }
-  
-            if(goodMid) {
-              chat.input.initMessageEditing(goodMid);
-              cancelEvent(e); // * prevent from scrolling
-            }
-          }
-        } else {
-          return;
-        }
-      } else if(e.code === 'ArrowDown') {
-        return;
-      }
-      
-      if(chat.input.messageInput && 
-        e.target !== chat.input.messageInput && 
-        target.tagName !== 'INPUT' && 
-        !target.hasAttribute('contenteditable') && 
-        !isTouchSupported && 
-        (!mediaSizes.isMobile || this.tabId === 1) && 
-        !this.chat.selection.isSelecting && 
-        !this.chat.input.recording) {
-        chat.input.messageInput.focus();
-        placeCaretAtEnd(chat.input.messageInput);
-      }
-    };
-    
-    document.body.addEventListener('keydown', onKeyDown);
-
-    rootScope.addEventListener('history_multiappend', (e) => {
-      const msgIdsByPeer = e;
-
-      for(const peerId in msgIdsByPeer) {
-        appSidebarRight.sharedMediaTab.renderNewMessages(+peerId, Array.from(msgIdsByPeer[peerId]));
-      }
-    });
-    
-    rootScope.addEventListener('history_delete', (e) => {
-      const {peerId, msgs} = e;
-
-      const mids = Object.keys(msgs).map(s => +s);
-      appSidebarRight.sharedMediaTab.deleteDeletedMessages(peerId, mids);
-    });
-
-    // Calls when message successfully sent and we have an id
-    rootScope.addEventListener('message_sent', (e) => {
-      const {storage, tempId, mid} = e;
-      const message = appMessagesManager.getMessageFromStorage(storage, mid);
-      appSidebarRight.sharedMediaTab.renderNewMessages(message.peerId, [mid]);
-    });
-
-    if(!isTouchSupported) {
+    if(!IS_TOUCH_SUPPORTED) {
       this.attachDragAndDropListeners();
     }
 
@@ -611,6 +1334,7 @@ export class AppImManager {
 
   private attachDragAndDropListeners() {
     const drops: ChatDragAndDrop[] = [];
+    const mediaDrops: ChatDragAndDrop[] = [];
     let mounted = false;
     const toggle = async(e: DragEvent, mount: boolean) => {
       if(mount === mounted) return;
@@ -619,63 +1343,84 @@ export class AppImManager {
       // @ts-ignore
       const isFiles = _types.contains ? _types.contains('Files') : _types.indexOf('Files') >= 0;
 
-      if(!isFiles || !this.canDrag()) { // * skip dragging text case
+      const newMediaPopup = getCurrentNewMediaPopup();
+      if(!isFiles || (!this.canDrag() && !newMediaPopup)) { // * skip dragging text case
         counter = 0;
         return;
       }
 
-      if(mount && !drops.length) {
-        const types: string[] = await getFilesFromEvent(e, true)
+      const _dropsContainer = newMediaPopup ? mediaDropsContainer : dropsContainer;
+      const _drops = newMediaPopup ? mediaDrops : drops;
+
+      if(mount && !_drops.length) {
+        const types: string[] = await getFilesFromEvent(e, true);
         const force = isFiles && !types.length; // * can't get file items not from 'drop' on Safari
         
-        const foundMedia = types.filter(t => ['image', 'video'].includes(t.split('/')[0])).length;
-        const foundDocuments = types.length - foundMedia;
+        const foundMedia = types.filter(t => MEDIA_MIME_TYPES_SUPPORTED.has(t)).length;
+        // const foundDocuments = types.length - foundMedia;
   
         this.log('drag files', types);
-        
-        if(types.length || force) {
-          drops.push(new ChatDragAndDrop(dropsContainer, {
-            icon: 'dragfiles',
-            header: 'Chat.DropTitle',
-            subtitle: 'Chat.DropAsFilesDesc',
-            onDrop: (e: DragEvent) => {
-              toggle(e, false);
-              appImManager.log('drop', e);
-              appImManager.onDocumentPaste(e, 'document');
-            }
-          }));
+
+        if(newMediaPopup) {
+          newMediaPopup.appendDrops(_dropsContainer);
+
+          if(types.length || force) {
+            _drops.push(new ChatDragAndDrop(_dropsContainer, {
+              header: 'Preview.Dragging.AddItems',
+              headerArgs: [types.length],
+              onDrop: (e: DragEvent) => {
+                toggle(e, false);
+                appImManager.log('drop', e);
+                appImManager.onDocumentPaste(e, 'document');
+              }
+            }));
+          }
+        } else {
+          if(types.length || force) {
+            _drops.push(new ChatDragAndDrop(_dropsContainer, {
+              icon: 'dragfiles',
+              header: 'Chat.DropTitle',
+              subtitle: 'Chat.DropAsFilesDesc',
+              onDrop: (e: DragEvent) => {
+                toggle(e, false);
+                appImManager.log('drop', e);
+                appImManager.onDocumentPaste(e, 'document');
+              }
+            }));
+          }
+    
+          // if((foundMedia && !foundDocuments) || force) {
+          if(foundMedia || force) {
+            _drops.push(new ChatDragAndDrop(_dropsContainer, {
+              icon: 'dragmedia',
+              header: 'Chat.DropTitle',
+              subtitle: 'Chat.DropQuickDesc',
+              onDrop: (e: DragEvent) => {
+                toggle(e, false);
+                appImManager.log('drop', e);
+                appImManager.onDocumentPaste(e, 'media');
+              }
+            }));
+          }
+
+          this.chat.container.append(_dropsContainer);
         }
-  
-        if((foundMedia && !foundDocuments) || force) {
-          drops.push(new ChatDragAndDrop(dropsContainer, {
-            icon: 'dragmedia',
-            header: 'Chat.DropTitle',
-            subtitle: 'Chat.DropQuickDesc',
-            onDrop: (e: DragEvent) => {
-              toggle(e, false);
-              appImManager.log('drop', e);
-              appImManager.onDocumentPaste(e, 'media');
-            }
-          }));
-        }
-  
-        this.chat.container.append(dropsContainer);
       }
 
       //if(!mount) return;
 
-      SetTransition(dropsContainer, 'is-visible', mount, 200, () => {
+      SetTransition(_dropsContainer, 'is-visible', mount, 200, () => {
         if(!mount) {
-          drops.forEach(drop => {
+          _drops.forEach(drop => {
             drop.destroy();
           });
 
-          drops.length = 0;
+          _drops.length = 0;
         }
       });
 
       if(mount) {
-        drops.forEach(drop => {
+        _drops.forEach(drop => {
           drop.setPath();
         });
       } else {
@@ -713,15 +1458,19 @@ export class AppImManager {
 
     const dropsContainer = document.createElement('div');
     dropsContainer.classList.add('drops-container');
+
+    const mediaDropsContainer = dropsContainer.cloneNode(true) as HTMLElement;
   }
 
   private canDrag() {
-    const peerId = this.chat?.peerId;
-    return !(!peerId || rootScope.overlayIsActive || (peerId < 0 && !appChatsManager.hasRights(peerId, 'send_media')));
+    const chat = this.chat;
+    const peerId = chat?.peerId;
+    return !(!peerId || rootScope.isOverlayActive || !chat.canSend('send_media'));
   }
 
   private onDocumentPaste = (e: ClipboardEvent | DragEvent, attachType?: 'media' | 'document') => {
-    if(!this.canDrag()) return;
+    const newMediaPopup = getCurrentNewMediaPopup();
+    if(!this.canDrag() && !newMediaPopup) return;
 
     //console.log('document paste');
     //console.log('item', event.clipboardData.getData());
@@ -737,12 +1486,13 @@ export class AppImManager {
     
     getFilesFromEvent(e).then((files: File[]) => {
       if(files.length) {
-        if(attachType === 'media' && files.find(file => !['image', 'video'].includes(file.type.split('/')[0]))) {
-          attachType = 'document';
+        if(newMediaPopup) {
+          newMediaPopup.addFiles(files);
+          return;
         }
-  
+    
         const chatInput = this.chat.input;
-        chatInput.willAttachType = attachType || (files[0].type.indexOf('image/') === 0 ? 'media' : "document");
+        chatInput.willAttachType = attachType || (MEDIA_MIME_TYPES_SUPPORTED.has(files[0].type) ? 'media' : 'document');
         new PopupNewMedia(this.chat, files, chatInput.willAttachType);
       }
     });
@@ -759,16 +1509,17 @@ export class AppImManager {
 
     this.log('selectTab', id, prevTabId);
 
-    let animationPromise: Promise<any> = doubleRaf();
+    let animationPromise: Promise<any> = rootScope.settings.animationsEnabled ? doubleRaf() : Promise.resolve();
     if(prevTabId !== -1 && prevTabId !== id && rootScope.settings.animationsEnabled && animate !== false) {
       const transitionTime = (mediaSizes.isMobile ? 250 : 200) + 100; // * cause transition time could be > 250ms
       animationPromise = pause(transitionTime);
       dispatchHeavyAnimationEvent(animationPromise, transitionTime);
 
-      this.columnEl.classList.add('disable-hover');
+      // ! it's very heavy operation. will blink in firefox
+      /* this.columnEl.classList.add('disable-hover');
       animationPromise.finally(() => {
         this.columnEl.classList.remove('disable-hover');
-      });
+      }); */
     }
 
     this.tabId = id;
@@ -783,13 +1534,13 @@ export class AppImManager {
           type: 'im', 
           onPop: (canAnimate) => {
             //this.selectTab(prevTabId, !isSafari);
-            this.setPeer(0, undefined, canAnimate);
+            this.setPeer({}, canAnimate);
           }
         });
       }
     }
 
-    rootScope.broadcast('im_tab_change', id);
+    rootScope.dispatchEvent('im_tab_change', id);
 
     //this._selectTab(id, mediaSizes.isMobile);
     //document.body.classList.toggle(RIGHT_COLUMN_ACTIVE_CLASSNAME, id === 2);
@@ -820,28 +1571,36 @@ export class AppImManager {
       apiManager, 
       appDraftsManager, 
       serverTimeManager, 
-      sessionStorage, 
+      stateStorage, 
       appNotificationsManager, 
-      appEmojiManager
+      appEmojiManager,
+      appMessagesIdsManager,
+      appGroupCallsManager,
+      appReactionsManager
     );
 
     if(this.chats.length) {
-      chat.backgroundEl.append(this.chat.backgroundEl.lastElementChild.cloneNode(true));
+      chat.setBackground(this.lastBackgroundUrl, true);
     }
 
     this.chats.push(chat);
+
+    return chat;
   }
 
   private spliceChats(fromIndex: number, justReturn = true, animate?: boolean, spliced?: Chat[]) {
     if(fromIndex >= this.chats.length) return;
 
+    const chatFrom = this.chat;
     if(this.chats.length > 1 && justReturn) {
-      rootScope.broadcast('peer_changing', this.chat);
+      rootScope.dispatchEvent('peer_changing', this.chat);
     }
 
     if(!spliced) {
       spliced = this.chats.splice(fromIndex, this.chats.length - fromIndex);
     }
+
+    rootScope.dispatchEvent('chat_changing', {from: chatFrom, to: this.chat});
 
     // * -1 because one item is being sliced when closing the chat by calling .removeByType
     for(let i = 0; i < spliced.length - 1; ++i) {
@@ -858,7 +1617,7 @@ export class AppImManager {
     this.chatsSelectTab(this.chat.container, animate);
 
     if(justReturn) {
-      rootScope.broadcast('peer_changed', this.chat.peerId);
+      rootScope.dispatchEvent('peer_changed', this.chat.peerId);
 
       const searchTab = appSidebarRight.getTab(AppPrivateSearchTab);
       if(searchTab) {
@@ -888,11 +1647,15 @@ export class AppImManager {
     }, 250 + 100);
   }
 
-  public setPeer(peerId: number, lastMsgId?: number, animate?: boolean): boolean {
+  public setPeer(options: ChatSetPeerOptions = {}, animate?: boolean): boolean {
     if(this.init) {
       this.init();
       this.init = null;
     }
+
+    options.peerId ??= NULL_PEER_ID;
+
+    const {peerId, lastMsgId} = options;
 
     const chat = this.chat;
     const chatIndex = this.chats.indexOf(chat);
@@ -917,7 +1680,7 @@ export class AppImManager {
           this.spliceChats(0, true, true, spliced);
           return;
         } else {
-          const ret = this.setPeer(peerId, lastMsgId);
+          const ret = this.setPeer(options);
           this.spliceChats(0, false, false, spliced);
           return ret;
         }
@@ -935,12 +1698,15 @@ export class AppImManager {
     }
 
     if(peerId || mediaSizes.activeScreen !== ScreenSize.mobile) {
-      const result = chat.setPeer(peerId, lastMsgId);
+      const result = chat.setPeer(peerId, lastMsgId, options.startParam);
 
       // * wait for cached render
       const promise = result?.cached ? result.promise : Promise.resolve();
       if(peerId) {
-        promise.then(() => {
+        Promise.all([
+          promise,
+          chat.setBackgroundPromise
+        ]).then(() => {
           //window.requestAnimationFrame(() => {
           setTimeout(() => { // * setTimeout is better here
             setTimeout(() => {
@@ -958,45 +1724,58 @@ export class AppImManager {
     }
   }
 
-  public setInnerPeer(peerId: number, lastMsgId?: number, type: ChatType = 'chat', threadId?: number) {
+  public setInnerPeer(options: ChatSetInnerPeerOptions) {
+    const {peerId} = options;
+    if(peerId === NULL_PEER_ID || !peerId) {
+      return;
+    }
+
+    const type = options.type ??= 'chat';
+
     // * prevent opening already opened peer
     const existingIndex = this.chats.findIndex(chat => chat.peerId === peerId && chat.type === type);
     if(existingIndex !== -1) {
       this.spliceChats(existingIndex + 1);
-      return this.setPeer(peerId, lastMsgId);
+      return this.setPeer(options);
     }
 
-    const chat = this.chat;
-    if(!chat.init) { // * use first not inited chat
-      this.createNewChat();
+    const oldChat = this.chat;
+    let chat = oldChat;
+    if(oldChat.inited) { // * use first not inited chat
+      chat = this.createNewChat();
     }
 
     if(type) {
-      this.chat.setType(type);
+      chat.setType(type);
 
-      if(threadId) {
-        this.chat.threadId = threadId;
+      if(options.threadId) {
+        chat.threadId = options.threadId;
       }
     }
 
-    //this.chatsSelectTab(this.chat.container);
+    rootScope.dispatchEvent('chat_changing', {from: oldChat, to: chat});
 
-    return this.setPeer(peerId, lastMsgId);
+    //this.chatsSelectTab(chat.container);
+
+    return this.setPeer(options);
   }
 
-  public openScheduled(peerId: number) {
-    this.setInnerPeer(peerId, undefined, 'scheduled');
+  public openScheduled(peerId: PeerId) {
+    this.setInnerPeer({
+      peerId, 
+      type: 'scheduled'
+    });
   }
 
   private getTypingElement(action: SendMessageAction) {
     const el = document.createElement('span');
-    el.classList.add('peer-typing');
+    let c = 'peer-typing';
+    el.classList.add(c);
     el.dataset.action = action._;
     switch(action._) {
       case 'sendMessageTypingAction': {
       //default: {
-        const c = 'peer-typing-text';
-        el.classList.add(c);
+        c += '-text';
         for(let i = 0; i < 3; ++i) {
           const dot = document.createElement('span');
           dot.className = c + '-dot';
@@ -1010,8 +1789,7 @@ export class AppImManager {
       case 'sendMessageUploadRoundAction':
       case 'sendMessageUploadVideoAction':
       case 'sendMessageUploadPhotoAction': {
-        const c = 'peer-typing-upload';
-        el.classList.add(c);
+        c += '-upload';
         /* const trail = document.createElement('span');
         trail.className = c + '-trail';
         el.append(trail); */
@@ -1021,18 +1799,30 @@ export class AppImManager {
       case 'sendMessageRecordAudioAction':
       case 'sendMessageRecordRoundAction':
       case 'sendMessageRecordVideoAction': {
-        const c = 'peer-typing-record';
-        el.classList.add(c);
+        c += '-record';
+        break;
+      }
+
+      case 'sendMessageEmojiInteractionSeen':
+      case 'sendMessageChooseStickerAction': {
+        c += '-choosing-sticker';
+        for(let i = 0; i < 2; ++i) {
+          const eye = document.createElement('div');
+          eye.className = c + '-eye';
+          el.append(eye);
+        }
         break;
       }
     }
 
+    el.classList.add(c);
+
     return el;
   }
 
-  public getPeerTyping(peerId: number, container?: HTMLElement) {
+  public getPeerTyping(peerId: PeerId, container?: HTMLElement) {
     if(!appUsersManager.isBot(peerId)) {
-      const typings = appChatsManager.getPeerTypings(peerId);
+      const typings = appProfileManager.getPeerTypings(peerId);
       if(!typings || !typings.length) {
         return;
       }
@@ -1052,7 +1842,9 @@ export class AppImManager {
           'sendMessageRecordVideoAction': 'Peer.Activity.User.RecordingVideo',
           'sendMessageRecordAudioAction': 'Peer.Activity.User.RecordingAudio',
           'sendMessageRecordRoundAction': 'Peer.Activity.User.RecordingVideo',
-          'sendMessageGamePlayAction': 'Peer.Activity.User.PlayingGame'
+          'sendMessageGamePlayAction': 'Peer.Activity.User.PlayingGame',
+          'sendMessageChooseStickerAction': 'Peer.Activity.User.ChoosingSticker',
+          'sendMessageEmojiInteractionSeen': 'Peer.Activity.User.EnjoyingAnimations'
         },
         chat: {
           'sendMessageTypingAction': 'Peer.Activity.Chat.TypingText',
@@ -1064,7 +1856,9 @@ export class AppImManager {
           'sendMessageRecordVideoAction': 'Peer.Activity.Chat.RecordingVideo',
           'sendMessageRecordAudioAction': 'Peer.Activity.Chat.RecordingAudio',
           'sendMessageRecordRoundAction': 'Peer.Activity.Chat.RecordingVideo',
-          'sendMessageGamePlayAction': 'Peer.Activity.Chat.PlayingGame'
+          'sendMessageGamePlayAction': 'Peer.Activity.Chat.PlayingGame',
+          'sendMessageChooseStickerAction': 'Peer.Activity.Chat.ChoosingSticker',
+          'sendMessageEmojiInteractionSeen': 'Peer.Activity.Chat.EnjoyingAnimations'
         },
         multi: {
           'sendMessageTypingAction': 'Peer.Activity.Chat.Multi.TypingText1',
@@ -1076,11 +1870,12 @@ export class AppImManager {
           'sendMessageRecordVideoAction': 'Peer.Activity.Chat.Multi.RecordingVideo1',
           'sendMessageRecordAudioAction': 'Peer.Activity.Chat.Multi.RecordingAudio1',
           'sendMessageRecordRoundAction': 'Peer.Activity.Chat.Multi.RecordingVideo1',
-          'sendMessageGamePlayAction': 'Peer.Activity.Chat.Multi.PlayingGame1'
+          'sendMessageGamePlayAction': 'Peer.Activity.Chat.Multi.PlayingGame1',
+          'sendMessageChooseStickerAction': 'Peer.Activity.Chat.Multi.ChoosingSticker1'
         }
       };
 
-      const mapa = peerId > 0 ? langPackKeys.private : (typings.length > 1 ? langPackKeys.multi : langPackKeys.chat);
+      const mapa = peerId.isUser() ? langPackKeys.private : (typings.length > 1 ? langPackKeys.multi : langPackKeys.chat);
       let action = typing.action;
 
       if(typings.length > 1) {
@@ -1108,6 +1903,8 @@ export class AppImManager {
         container.classList.add('online', 'peer-typing-container');
       }
 
+      container.classList.toggle('peer-typing-flex', action._ === 'sendMessageChooseStickerAction' || action._ === 'sendMessageEmojiInteractionSeen');
+
       let typingElement = container.firstElementChild as HTMLElement;
       if(!typingElement) {
         typingElement = this.getTypingElement(action);
@@ -1119,12 +1916,24 @@ export class AppImManager {
       }
 
       let args: any[];
-      if(peerId < 0) {
+      if(peerId.isAnyChat()) {
         args = [
-          new PeerTitle({peerId: typing.userId, onlyFirstName: true}).element,
+          new PeerTitle({peerId: typing.userId.toPeerId(false), onlyFirstName: true}).element,
           typings.length - 1
         ];
       }
+
+      if(action._ === 'sendMessageEmojiInteractionSeen') {
+        if(args) {
+          args.pop();
+        } else {
+          args = [];
+        }
+
+        const span = htmlToSpan(RichTextProcessor.wrapEmojiText(action.emoticon));
+        args.push(span);
+      }
+
       const descriptionElement = i18n(langPackKey, args);
       descriptionElement.classList.add('peer-typing-description');
 
@@ -1134,36 +1943,43 @@ export class AppImManager {
     }
   }
 
-  public async getPeerStatus(peerId: number) {
+  public async getPeerStatus(peerId: PeerId, ignoreSelf?: boolean) {
     let subtitle: HTMLElement;
-    if(!peerId) return '';
+    if(!peerId) return;
 
-    if(peerId < 0) { // not human
+    if(peerId.isAnyChat()) { // not human
       let span = this.getPeerTyping(peerId);
       if(span) {
         return span;
       }
 
-      const chatInfo = await appProfileManager.getChatFull(-peerId) as any;
+      const chatId = peerId.toChatId();
+      const chatInfo = await appProfileManager.getChatFull(chatId) as any;
       this.chat.log('chatInfo res:', chatInfo);
 
       const participants_count = chatInfo.participants_count || (chatInfo.participants && chatInfo.participants.participants && chatInfo.participants.participants.length) || 1;
       //if(participants_count) {
-        subtitle = appChatsManager.getChatMembersString(-peerId);
+        subtitle = appProfileManager.getChatMembersString(chatId);
 
-        if(participants_count < 2) return subtitle;
-        /* const onlines = await appChatsManager.getOnlines(chat.id);
+        if(participants_count < 2) {
+          return subtitle;
+        }
+
+        const onlines = await appProfileManager.getOnlines(chatId);
         if(onlines > 1) {
-          subtitle += ', ' + numberThousandSplitter(onlines) + ' online';
-        } */
+          const span = document.createElement('span');
+          
+          span.append(...join([subtitle, i18n('OnlineCount', [numberThousandSplitter(onlines)])], false));
+          subtitle = span;
+        }
   
         return subtitle;
       //}
     } else { // user
       const user = appUsersManager.getUser(peerId);
       
-      if(rootScope.myId === peerId) {
-        return '';
+      if(rootScope.myId === peerId && !ignoreSelf) {
+        return;
       } else if(user) {
         subtitle = appUsersManager.getUserStatusString(user.id);
 
@@ -1185,7 +2001,7 @@ export class AppImManager {
     }
   }
 
-  public setPeerStatus(peerId: number, element: HTMLElement, needClear: boolean, useWhitespace: boolean, middleware: () => boolean) {
+  public setPeerStatus(peerId: PeerId, element: HTMLElement, needClear: boolean, useWhitespace: boolean, middleware: () => boolean, ignoreSelf?: boolean) {
     if(needClear) {
       element.innerHTML = useWhitespace ? '‎' : ''; // ! HERE U CAN FIND WHITESPACE
     }
@@ -1196,13 +2012,17 @@ export class AppImManager {
       return;
     }
 
-    this.getPeerStatus(peerId).then((subtitle) => {
+    this.getPeerStatus(peerId, ignoreSelf).then((subtitle) => {
       if(!middleware()) {
         return;
       }
 
       replaceContent(element, subtitle || (useWhitespace ? '‎' : ''));
     });
+  }
+
+  public setChoosingStickerTyping(cancel: boolean) {
+    appMessagesManager.setTyping(this.chat.peerId, {_: cancel ? 'sendMessageCancelAction' : 'sendMessageChooseStickerAction'});
   }
 }
 

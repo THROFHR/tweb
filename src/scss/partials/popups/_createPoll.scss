@@ -65,15 +65,17 @@
 
   .caption {    
     color: var(--secondary-text-color);
-    font-weight: 500;
+    font-weight: var(--font-weight-bold);
     padding: 1rem 1.5rem 0;
   }
 
   .poll-create-questions {
-    padding: 0px 1.25rem 1.5rem;
+    padding: 0 1.25rem 1.5rem;
 
-    .input-field-input {
-      padding-right: 3.25rem;
+    &:not(:last-child) {
+      .input-field-input {
+        padding-right: 3.25rem;
+      }
     }
   }
 

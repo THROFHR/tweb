@@ -15,18 +15,16 @@ export default class AppArchivedTab extends SliderSuperTab {
     this.container.id = 'chats-archived-container';
     this.setTitle('ArchivedChats');
 
-    //this.scrollable = new Scrollable(this.container, 'CLA', 500);
-    const chatList = appDialogsManager.chatLists[AppArchivedTab.filterId];
-    this.scrollable.append(chatList);
-    this.scrollable.container.addEventListener('scroll', appDialogsManager.onChatsRegularScroll);
-    this.scrollable.setVirtualContainer(chatList);
-    this.scrollable.onScrolledTop = appDialogsManager.onChatsScrollTop;
-    this.scrollable.onScrolledBottom = appDialogsManager.onChatsScroll;
-    ///this.scroll.attachSentinels();
+    if(!appDialogsManager.sortedLists[AppArchivedTab.filterId]) {
+      const chatList = appDialogsManager.createChatList();
+      appDialogsManager.generateScrollable(chatList, AppArchivedTab.filterId).container.append(chatList);
+      appDialogsManager.setListClickListener(chatList, null, true);
+      //appDialogsManager.setListClickListener(archivedChatList, null, true); // * to test peer changing
+    }
 
-    this.listenerSetter.add(window, 'resize', () => {
-      setTimeout(appDialogsManager.scroll.checkForTriggers, 0);
-    });
+    const scrollable = appDialogsManager.scrollables[AppArchivedTab.filterId];
+    this.scrollable.container.replaceWith(scrollable.container);
+    this.scrollable = scrollable;
   }
 
   onOpen() {
@@ -36,24 +34,22 @@ export default class AppArchivedTab extends SliderSuperTab {
     }
 
     this.wasFilterId = appDialogsManager.filterId;
-    appDialogsManager.scroll = this.scrollable;
-    appDialogsManager.filterId = AppArchivedTab.filterId;
+    appDialogsManager.setFilterId(AppArchivedTab.filterId);
     appDialogsManager.onTabChange();
   }
 
   // вообще, так делать нельзя, но нет времени чтобы переделать главный чатлист на слайд...
   onOpenAfterTimeout() {
-    appDialogsManager.chatLists[this.wasFilterId].innerHTML = '';
+    appDialogsManager.sortedLists[this.wasFilterId].clear();
   }
 
   onClose() {
-    appDialogsManager.scroll = appDialogsManager._scroll;
-    appDialogsManager.filterId = this.wasFilterId;
+    appDialogsManager.setFilterId(this.wasFilterId);
     appDialogsManager.onTabChange();
   }
 
   onCloseAfterTimeout() {
-    appDialogsManager.chatLists[AppArchivedTab.filterId].innerHTML = '';
+    appDialogsManager.sortedLists[AppArchivedTab.filterId].clear();
     return super.onCloseAfterTimeout();
   }
 }

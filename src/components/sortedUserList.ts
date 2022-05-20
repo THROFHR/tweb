@@ -5,36 +5,100 @@
  */
 
 import type { LazyLoadQueueIntersector } from "./lazyLoadQueue";
-import appDialogsManager, { DialogDom } from "../lib/appManagers/appDialogsManager";
+import appDialogsManager, { AppDialogsManager, DialogDom } from "../lib/appManagers/appDialogsManager";
 import { getHeavyAnimationPromise } from "../hooks/useHeavyAnimationCheck";
 import appUsersManager from "../lib/appManagers/appUsersManager";
-import { insertInDescendSortedArray } from "../helpers/array";
 import isInDOM from "../helpers/dom/isInDOM";
 import positionElementByIndex from "../helpers/dom/positionElementByIndex";
 import replaceContent from "../helpers/dom/replaceContent";
+import { fastRaf } from "../helpers/schedulers";
+import SortedList, { SortedElementBase } from "../helpers/sortedList";
+import safeAssign from "../helpers/object/safeAssign";
 
-type SortedUser = {
-  peerId: number, 
-  status: number, 
+interface SortedUser extends SortedElementBase {
   dom: DialogDom
-};
-export default class SortedUserList {
-  public static SORT_INTERVAL = 30e3;
+}
+
+export default class SortedUserList extends SortedList<SortedUser> {
+  protected static SORT_INTERVAL = 30e3;
   public list: HTMLUListElement;
-  public users: Map<number, SortedUser>;
-  public sorted: Array<SortedUser>;
-  public lazyLoadQueue: LazyLoadQueueIntersector;
+  
+  protected lazyLoadQueue: LazyLoadQueueIntersector;
+  protected avatarSize = 48;
+  protected rippleEnabled = true;
+  protected autonomous = true;
+  protected createChatListOptions: Parameters<AppDialogsManager['createChatList']>[0];
+  protected onListLengthChange: () => void;
+  protected getIndex: (element: SortedUser) => number;
+  protected onUpdate: (element: SortedUser) => void;
 
-  constructor() {
-    this.list = appDialogsManager.createChatList();
+  constructor(options: Partial<{
+    lazyLoadQueue: SortedUserList['lazyLoadQueue'],
+    avatarSize: SortedUserList['avatarSize'],
+    rippleEnabled: SortedUserList['rippleEnabled'],
+    createChatListOptions: SortedUserList['createChatListOptions'],
+    autonomous: SortedUserList['autonomous'],
+    onListLengthChange: SortedUserList['onListLengthChange'],
+    getIndex: SortedUserList['getIndex'],
+    onUpdate: SortedUserList['onUpdate']
+  }> = {}) {
+    super({
+      getIndex: options.getIndex || ((element) => appUsersManager.getUserStatusForSort(element.id)),
+      onDelete: (element) => {
+        element.dom.listEl.remove();
+        this.onListLengthChange && this.onListLengthChange();
+      },
+      onUpdate: options.onUpdate || ((element) => {
+        const status = appUsersManager.getUserStatusString(element.id);
+        replaceContent(element.dom.lastMessageSpan, status);
+      }),
+      onSort: (element, idx) => {
+        const willChangeLength = element.dom.listEl.parentElement !== this.list;
+        positionElementByIndex(element.dom.listEl, this.list, idx);
 
-    this.users = new Map();
-    this.sorted = [];
+        if(willChangeLength && this.onListLengthChange) {
+          this.onListLengthChange();
+        }
+      },
+      onElementCreate: (base) => {
+        const {dom} = appDialogsManager.addDialogNew({
+          dialog: base.id,
+          container: false,
+          drawStatus: false,
+          avatarSize: this.avatarSize,
+          autonomous: this.autonomous,
+          meAsSaved: false,
+          rippleEnabled: this.rippleEnabled,
+          lazyLoadQueue: this.lazyLoadQueue
+        });
+
+        (base as SortedUser).dom = dom;
+        return base as SortedUser;
+      },
+      updateElementWith: fastRaf,
+      updateListWith: async(callback) => {
+        if(!isInDOM(this.list)) {
+          return callback(false);
+        }
+    
+        await getHeavyAnimationPromise();
+    
+        if(!isInDOM(this.list)) {
+          return callback(false);
+        }
+
+        callback(true);
+      }
+    });
+
+    safeAssign(this, options);
+
+    this.list = appDialogsManager.createChatList(this.createChatListOptions);
 
     let timeout: number;
     const doTimeout = () => {
       timeout = window.setTimeout(() => {
-        this.updateList().then((good) => {
+        this.updateList((good) => {
           if(good) {
             doTimeout();
           }
@@ -43,65 +107,5 @@ export default class SortedUserList {
     };
 
     doTimeout();
-  }
-
-  public async updateList() {
-    if(!isInDOM(this.list)) {
-      return false;
-    }
-
-    await getHeavyAnimationPromise();
-
-    if(!isInDOM(this.list)) {
-      return false;
-    }
-
-    this.users.forEach(user => {
-      this.update(user.peerId, true);
-    });
-
-    this.sorted.forEach((sortedUser, idx) => {
-      positionElementByIndex(sortedUser.dom.listEl, this.list, idx);
-    });
-
-    return true;
-  }
-
-  public add(peerId: number) {
-    if(this.users.has(peerId)) {
-      return;
-    }
-
-    const {dom} = appDialogsManager.addDialogNew({
-      dialog: peerId,
-      container: false,
-      drawStatus: false,
-      avatarSize: 48,
-      autonomous: true,
-      meAsSaved: false,
-      rippleEnabled: false,
-      lazyLoadQueue: this.lazyLoadQueue
-    });
-
-    const sortedUser: SortedUser = {
-      peerId,
-      status: appUsersManager.getUserStatusForSort(peerId),
-      dom
-    };
-
-    this.users.set(peerId, sortedUser);
-    this.update(peerId);
-  }
-
-  public update(peerId: number, batch = false) {
-    const sortedUser = this.users.get(peerId);
-    sortedUser.status = appUsersManager.getUserStatusForSort(peerId);
-    const status = appUsersManager.getUserStatusString(peerId);
-    replaceContent(sortedUser.dom.lastMessageSpan, status);
-
-    const idx = insertInDescendSortedArray(this.sorted, sortedUser, 'status');
-    if(!batch) {
-      positionElementByIndex(sortedUser.dom.listEl, this.list, idx);
-    }
   }
 }

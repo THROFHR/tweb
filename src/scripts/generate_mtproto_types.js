@@ -12,9 +12,14 @@ const replace = require(__dirname + '/in/schema_replace_types.json');
 const mtproto = schema.API;
 
 for(const constructor of additional) {
-  constructor.params.forEach(param => {
+  const additionalParams = constructor.params || (constructor.params = []);
+  additionalParams.forEach(param => {
     param.type = 'flags.-1?' + param.type;
   });
+
+  if(constructor.properties) {
+    additionalParams.push(...constructor.properties);
+  }
 
   if(constructor.type) {
     mtproto.constructors.push(constructor);
@@ -22,13 +27,22 @@ for(const constructor of additional) {
 
   const realConstructor = constructor.type ? constructor : mtproto.constructors.find(c => c.predicate == constructor.predicate);
 
+  if(!constructor.type) {
+    for(let i = realConstructor.params.length - 1; i >= 0; --i) {
+      const param = realConstructor.params[i];
+      if(additionalParams.find(newParam => newParam.name === param.name)) {
+        realConstructor.params.splice(i, 1);
+      }
+    }
+  }
+
   /* constructor.params.forEach(param => {
     const index = realConstructor.params.findIndex(_param => _param.predicate == param.predicate);
     if(index !== -1) {
       realConstructor.params.splice(index, 1);
     }
   }); */
-  realConstructor.params.splice(realConstructor.params.length, 0, ...constructor.params);
+  realConstructor.params.splice(realConstructor.params.length, 0, ...additionalParams);
 }
 
 ['Vector t', 'Bool', 'True', 'Null'].forEach(key => {
@@ -69,8 +83,8 @@ function camelizeName(string, camelizeFirstLetterIfFound, camelizeFirstLetterIfN
   });
 }
 
-/** @type {(type: string, parseBooleanFlags: boolean) => any} */
-const processParamType = (type, parseBooleanFlags) => {
+/** @type {(type: string, parseBooleanFlags: boolean, overrideTypes?: {[type: string]: string}) => any} */
+const processParamType = (type, parseBooleanFlags, overrideTypes) => {
   const isAdditional = type.indexOf('flags.-1?') === 0;
   const isFlag = type.includes('?');
   if(isFlag) {
@@ -78,7 +92,12 @@ const processParamType = (type, parseBooleanFlags) => {
   }
 
   if(type.includes('Vector')) {
-    return `Array<${processParamType(type.slice(7, -1), parseBooleanFlags)}>`;
+    return `Array<${processParamType(type.slice(7, -1), parseBooleanFlags, overrideTypes)}>`;
+  }
+
+  const overridden = overrideTypes && overrideTypes[type];
+  if(overridden) {
+    return overridden;
   }
 
   switch(type) {
@@ -96,7 +115,7 @@ const processParamType = (type, parseBooleanFlags) => {
       return 'number';
 
     case 'long': 
-      return 'string';
+      return 'string | number';
 
     case 'bytes':
       return 'Uint8Array';
@@ -111,12 +130,12 @@ const processParamType = (type, parseBooleanFlags) => {
     default:
       //console.log('no such type', type);
       //throw new Error('no such type: ' + type);
-      return isAdditional ? type : camelizeName(type, true);
+      return isAdditional || type[0] === type[0].toUpperCase() ? type : camelizeName(type, true);
   }
 };
 
-/** @type {(params: {name: string, type: string}[], object: any, parseBooleanFlags: boolean) => any} */
-const processParams = (params, object = {}, parseBooleanFlags = true) => {
+/** @type {(params: {name: string, type: string}[], object: any, parseBooleanFlags: boolean, overrideTypes?: {[type: string]: string}) => any} */
+const processParams = (params, object = {}, parseBooleanFlags = true, overrideTypes) => {
   for(const param of params) {
     let {name, type} = param;
 
@@ -128,7 +147,7 @@ const processParams = (params, object = {}, parseBooleanFlags = true) => {
       type = replace[name];
     }
 
-    const processed = processParamType(type, parseBooleanFlags);
+    const processed = processParamType(type, parseBooleanFlags, overrideTypes);
     if(type.includes('?true') && parseBooleanFlags) {
       if(!object.pFlags) object.pFlags = {};
       object.pFlags[name] = processed;
@@ -238,16 +257,22 @@ out += `}\n\n`;
 
 /** @type {{[method: string]: {req: string, res: string}}} */
 const methodsMap = {};
+// const overrideMethodTypes = {
+//   long: 'string | number'
+// };
 mtproto.methods.forEach((_method) => {
   const {method, type, params} = _method;
 
   const camelizedMethod = camelizeName(method, true, true);
 
-  methodsMap[method] = {req: camelizedMethod, res: processParamType(type, false)};
+  methodsMap[method] = {
+    req: camelizedMethod, 
+    res: processParamType(type, false, {'JSONValue': 'any'}/* , overrideMethodTypes */)
+  };
 
   let str = `export type ${camelizedMethod} = {\n`;
 
-  const object = processParams(params, {}, false);
+  const object = processParams(params, {}, false/* , overrideMethodTypes */);
 
   const serialized = serializeObject(object, [], '\t');
 

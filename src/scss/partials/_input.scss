@@ -58,6 +58,7 @@
     pointer-events: none;
     margin-top: calc((var(--height) - 1.5rem) / 2); // * Center of first line
     user-select: none;
+    white-space: nowrap;
 
     @include animation-level(2) {
       transition: .2s transform, .2s padding, .1s opacity, font-weight 0s .1s;
@@ -197,7 +198,7 @@
     
     &:focus ~ label {
       color: var(--primary-color);
-      font-weight: 500;
+      font-weight: var(--font-weight-bold);
     }
 
     &:focus ~ .input-field-border {
@@ -392,6 +393,9 @@ input:focus, button:focus {
     &[type="password"] {
       font-size: 2.25rem;
       padding-left: calc(.875rem - var(--border-width));
+      line-height: 1;
+      padding-top: 0;
+      padding-bottom: 0;
   
       @media (-webkit-min-device-pixel-ratio: 2) { 
         font-size: 1.75rem;
@@ -430,6 +434,19 @@ input:focus, button:focus {
     
     @include hover() {
       color: var(--primary-text-color);
+    }
+  }
+}
+
+.input-field-phone {
+  .input-field-input {
+    --letter-spacing: .24px;
+
+    &:after {
+      content: attr(data-left-pattern);
+      // opacity: .4;
+      color: $placeholder-color;
+      letter-spacing: var(--letter-spacing);
     }
   }
 }

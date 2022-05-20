@@ -4,27 +4,40 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { AttachClickOptions, CLICK_EVENT_NAME } from "../helpers/dom/clickEvent";
 import ListenerSetter from "../helpers/listenerSetter";
 import ButtonIcon from "./buttonIcon";
 import ButtonMenu, { ButtonMenuItemOptions } from "./buttonMenu";
 import { closeBtnMenu, openBtnMenu } from "./misc";
 
-const ButtonMenuToggle = (options: Partial<{noRipple: true, onlyMobile: true, listenerSetter: ListenerSetter, asDiv: boolean}> = {}, direction: 'bottom-left' | 'bottom-right' | 'top-left' | 'top-right', buttons: ButtonMenuItemOptions[], onOpen?: (e: Event) => void) => {
+const ButtonMenuToggle = (
+  options: Partial<{
+    noRipple: true, 
+    onlyMobile: true, 
+    listenerSetter: ListenerSetter, 
+    asDiv: boolean,
+    container: HTMLElement
+  }> = {}, 
+  direction: 'bottom-left' | 'bottom-right' | 'top-left' | 'top-right', 
+  buttons: ButtonMenuItemOptions[], 
+  onOpen?: (e: Event) => void,
+  onClose?: () => void
+) => {
   options.asDiv = true;
-  const button = ButtonIcon('more btn-menu-toggle', options);
+  const button = options.container ?? ButtonIcon('more', options);
+  button.classList.add('btn-menu-toggle');
 
   const btnMenu = ButtonMenu(buttons, options.listenerSetter);
   btnMenu.classList.add(direction);
-  ButtonMenuToggleHandler(button, onOpen, options);
+  ButtonMenuToggleHandler(button, onOpen, options, onClose);
   button.append(btnMenu);
   return button;
 };
 
 // TODO: refactor for attachClickEvent, because if move finger after touchstart, it will start anyway
-const ButtonMenuToggleHandler = (el: HTMLElement, onOpen?: (e: Event) => void, options?: AttachClickOptions) => {
-  const add = options?.listenerSetter ? options.listenerSetter.add.bind(options.listenerSetter, el) : el.addEventListener.bind(el);
+const ButtonMenuToggleHandler = (el: HTMLElement, onOpen?: (e: Event) => void, options?: AttachClickOptions, onClose?: () => void) => {
+  const add = options?.listenerSetter ? options.listenerSetter.add(el) : el.addEventListener.bind(el);
 
   //console.trace('ButtonMenuToggleHandler attach', el, onOpen, options);
   add(CLICK_EVENT_NAME, (e: Event) => {
@@ -39,7 +52,7 @@ const ButtonMenuToggleHandler = (el: HTMLElement, onOpen?: (e: Event) => void, o
       closeBtnMenu();
     } else {
       onOpen && onOpen(e);
-      openBtnMenu(openedMenu);
+      openBtnMenu(openedMenu, onClose);
     }
   });
 };

@@ -17,20 +17,21 @@ import ButtonCorner from "../../buttonCorner";
 import { attachClickEvent } from "../../../helpers/dom/clickEvent";
 
 export default class AppBlockedUsersTab extends SliderSuperTab {
-  public peerIds: number[];
+  public peerIds: PeerId[];
   private menuElement: HTMLElement;
   
   protected init() {
+    this.header.classList.add('with-border');
     this.container.classList.add('blocked-users-container');
     this.setTitle('BlockedUsers');
 
-    {
-      const section = new SettingSection({
-        caption: 'BlockedUsersInfo'
-      });
+    const section = new SettingSection({
+      caption: 'BlockedUsersInfo'
+    });
 
-      this.scrollable.append(section.container);
-    }
+    section.caption.parentElement.prepend(section.caption);
+
+    this.scrollable.append(section.container);
 
     const btnAdd = ButtonCorner({icon: 'add', className: 'is-visible'});
     this.content.append(btnAdd);
@@ -48,9 +49,9 @@ export default class AppBlockedUsersTab extends SliderSuperTab {
 
     const list = appDialogsManager.createChatList();
     this.scrollable.container.classList.add('chatlist-container');
-    this.scrollable.append(list);
+    section.content.append(list);
 
-    const add = (peerId: number, append: boolean) => {
+    const add = (peerId: PeerId, append: boolean) => {
       const {dom} = appDialogsManager.addDialogNew({
         dialog: peerId,
         container: list,
@@ -78,7 +79,7 @@ export default class AppBlockedUsersTab extends SliderSuperTab {
 
     let target: HTMLElement;
     const onUnblock = () => {
-      const peerId = +target.dataset.peerId;
+      const peerId = target.dataset.peerId.toPeerId();
       appUsersManager.toggleBlock(peerId, false);
     };
 
@@ -107,7 +108,7 @@ export default class AppBlockedUsersTab extends SliderSuperTab {
       openBtnMenu(element);
     }, this.listenerSetter);
 
-    this.listenerSetter.add(rootScope, 'peer_block', (update) => {
+    this.listenerSetter.add(rootScope)('peer_block', (update) => {
       const {peerId, blocked} = update;
       const li = list.querySelector(`[data-peer-id="${peerId}"]`);
       if(blocked) {

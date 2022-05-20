@@ -6,7 +6,7 @@
 
 import { attachClickEvent } from "../../../helpers/dom/clickEvent";
 import toggleDisability from "../../../helpers/dom/toggleDisability";
-import { deepEqual } from "../../../helpers/object";
+import deepEqual from "../../../helpers/object/deepEqual";
 import { ChannelParticipant } from "../../../layer";
 import appChatsManager from "../../../lib/appManagers/appChatsManager";
 import appDialogsManager from "../../../lib/appManagers/appDialogsManager";
@@ -18,8 +18,8 @@ import { ChatPermissions } from "./groupPermissions";
 
 export default class AppUserPermissionsTab extends SliderSuperTabEventable {
   public participant: ChannelParticipant;
-  public chatId: number;
-  public userId: number;
+  public chatId: ChatId;
+  public userId: UserId;
 
   protected init() {
     this.container.classList.add('edit-peer-container', 'user-permissions-container');
@@ -36,11 +36,11 @@ export default class AppUserPermissionsTab extends SliderSuperTabEventable {
       div.classList.add('chatlist-container');
       section.content.insertBefore(div, section.title);
 
-      const list = appDialogsManager.createChatList();
+      const list = appDialogsManager.createChatList({new: true});
       div.append(list);
 
       const {dom} = appDialogsManager.addDialogNew({
-        dialog: this.userId,
+        dialog: this.userId.toPeerId(false),
         container: list,
         drawStatus: false,
         rippleEnabled: true,
@@ -66,7 +66,7 @@ export default class AppUserPermissionsTab extends SliderSuperTabEventable {
         appChatsManager.editBanned(this.chatId, this.participant, rights);
       };
 
-      this.eventListener.addEventListener('destroy', destroyListener);
+      this.eventListener.addEventListener('destroy', destroyListener, {once: true});
 
       this.scrollable.append(section.container);
     }

@@ -10,17 +10,18 @@ import CheckboxField from "../../checkboxField";
 import { InputNotifyPeer, Update } from "../../../layer";
 import appNotificationsManager from "../../../lib/appManagers/appNotificationsManager";
 import { SliderSuperTabEventable } from "../../sliderTab";
-import { copy } from "../../../helpers/object";
 import rootScope from "../../../lib/rootScope";
-import { convertKeyToInputKey } from "../../../helpers/string";
 import { LangPackKey } from "../../../lib/langPack";
 import appStateManager from "../../../lib/appManagers/appStateManager";
+import copy from "../../../helpers/object/copy";
+import convertKeyToInputKey from "../../../helpers/string/convertKeyToInputKey";
 
 type InputNotifyKey = Exclude<InputNotifyPeer['_'], 'inputNotifyPeer'>;
 
 export default class AppNotificationsTab extends SliderSuperTabEventable {
   protected init() {
-    this.container.classList.add('notifications-container');
+    this.header.classList.add('with-border');
+    this.container.classList.add('notifications-container', 'with-border');
     this.setTitle('Telegram.NotificationSettingsViewController');
 
     const NotifySection = (options: {
@@ -38,7 +39,7 @@ export default class AppNotificationsTab extends SliderSuperTabEventable {
       });
       
       const previewEnabledRow = new Row({
-        checkboxField: new CheckboxField({text: 'Notifications.MessagePreview', checked: true}),
+        checkboxField: new CheckboxField({text: 'MessagePreview', checked: true}),
         subtitleLangKey: 'Loading',
       });
 
@@ -73,9 +74,9 @@ export default class AppNotificationsTab extends SliderSuperTabEventable {
           inputSettings.show_previews = showPreviews;
 
           appNotificationsManager.updateNotifySettings(inputNotifyPeer, inputSettings);
-        }, true);
+        }, {once: true});
 
-        this.listenerSetter.add(rootScope, 'notify_settings', (update: Update.updateNotifySettings) => {
+        this.listenerSetter.add(rootScope)('notify_settings', (update: Update.updateNotifySettings) => {
           const inputKey = convertKeyToInputKey(update.peer._) as any;
           if(options.inputKey === inputKey) {
             notifySettings = update.notify_settings;
@@ -134,7 +135,7 @@ export default class AppNotificationsTab extends SliderSuperTabEventable {
           if(enabled !== _enabled) {
             appNotificationsManager.setContactSignUpNotification(!_enabled);
           }
-        }, true);
+        }, {once: true});
       });
     }
   }

@@ -9,17 +9,23 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import { formatPhoneNumber } from "../../components/misc";
 import { MOUNT_CLASS_TO } from "../../config/debug";
+import filterUnique from "../../helpers/array/filterUnique";
+import findAndSplice from "../../helpers/array/findAndSplice";
+import indexOfAndSplice from "../../helpers/array/indexOfAndSplice";
+import deferredPromise, { CancellablePromise } from "../../helpers/cancellablePromise";
 import cleanSearchText from "../../helpers/cleanSearchText";
 import cleanUsername from "../../helpers/cleanUsername";
-import { tsNow } from "../../helpers/date";
-import { safeReplaceObject, isObject } from "../../helpers/object";
-import { InputUser, Update, User as MTUser, UserStatus } from "../../layer";
+import { formatFullSentTimeRaw, tsNow } from "../../helpers/date";
+import { formatPhoneNumber } from "../../helpers/formatPhoneNumber";
+import isObject from "../../helpers/object/isObject";
+import safeReplaceObject from "../../helpers/object/safeReplaceObject";
+import { isRestricted } from "../../helpers/restrictions";
+import { Chat, ContactsResolvedPeer, InputContact, InputGeoPoint, InputMedia, InputPeer, InputUser, User as MTUser, UserProfilePhoto, UserStatus } from "../../layer";
 import I18n, { i18n, LangPackKey } from "../langPack";
 //import apiManager from '../mtproto/apiManager';
 import apiManager from '../mtproto/mtprotoworker';
-import { REPLIES_PEER_ID } from "../mtproto/mtproto_config";
+import { REPLIES_PEER_ID, SERVICE_PEER_ID } from "../mtproto/mtproto_config";
 import serverTimeManager from "../mtproto/serverTimeManager";
 import { RichTextProcessor } from "../richtextprocessor";
 import rootScope from "../rootScope";
@@ -29,26 +35,28 @@ import appChatsManager from "./appChatsManager";
 import appPeersManager from "./appPeersManager";
 import appStateManager from "./appStateManager";
 
-// TODO: updateUserBlocked
-
 export type User = MTUser.user;
+export type TopPeerType = 'correspondents' | 'bots_inline';
+export type MyTopPeer = {id: PeerId, rating: number};
 
 export class AppUsersManager {
   private storage = appStateManager.storages.users;
   
-  private users: {[userId: number]: User} = {};
-  private usernames: {[username: string]: number} = {};
-  private contactsIndex = new SearchIndex<number>();
-  private contactsFillPromise: Promise<Set<number>>;
-  private contactsList: Set<number> = new Set();
-  private updatedContactsList = false;
+  private users: {[userId: UserId]: User};
+  private usernames: {[username: string]: UserId};
+  private contactsIndex: SearchIndex<UserId>;
+  private contactsFillPromise: CancellablePromise<AppUsersManager['contactsList']>;
+  private contactsList: Set<UserId>;
+  private updatedContactsList: boolean;
   
-  private getTopPeersPromise: Promise<number[]>;
+  private getTopPeersPromises: {[type in TopPeerType]?: Promise<MyTopPeer[]>};
 
   constructor() {
+    this.clear(true);
+
     setInterval(this.updateUsersStatuses, 60000);
 
-    rootScope.on('state_synchronized', this.updateUsersStatuses);
+    rootScope.addEventListener('state_synchronized', this.updateUsersStatuses);
 
     rootScope.addMultipleEventsListeners({
       updateUserStatus: (update) => {
@@ -67,7 +75,7 @@ export class AppUsersManager {
           }
 
           //user.sortStatus = this.getUserStatusForSort(user.status);
-          rootScope.broadcast('user_update', userId);
+          rootScope.dispatchEvent('user_update', userId);
           this.setUserToStateIfNeeded(user);
         } //////else console.warn('No user by id:', userId);
       },
@@ -76,7 +84,11 @@ export class AppUsersManager {
         const userId = update.user_id;
         const user = this.users[userId];
         if(user) {
-          this.forceUserOnline(userId);
+          if((user.photo as UserProfilePhoto.userProfilePhoto)?.photo_id === (update.photo as UserProfilePhoto.userProfilePhoto)?.photo_id) {
+            return;
+          }
+
+          this.forceUserOnline(userId, update.date);
 
           if(update.photo._ === 'userProfilePhotoEmpty') {
             delete user.photo;
@@ -86,8 +98,8 @@ export class AppUsersManager {
 
           this.setUserToStateIfNeeded(user);
 
-          rootScope.broadcast('user_update', userId);
-          rootScope.broadcast('avatar_update', userId);
+          rootScope.dispatchEvent('user_update', userId);
+          rootScope.dispatchEvent('avatar_update', userId.toPeerId());
         } else console.warn('No user by id:', userId);
       },
 
@@ -97,11 +109,12 @@ export class AppUsersManager {
         if(user) {
           this.forceUserOnline(userId);
           
-          this.saveApiUser(Object.assign({}, user, {
+          this.saveApiUser({
+            ...user, 
             first_name: update.first_name,
             last_name: update.last_name,
             username: update.username
-          }), true);
+          }, true);
         }
       }
     });
@@ -110,7 +123,7 @@ export class AppUsersManager {
     this.onContactUpdated(update.user_id, update.my_link._ === 'contactLinkContact');
     break; */
 
-    rootScope.on('language_change', (e) => {
+    rootScope.addEventListener('language_change', (e) => {
       const userId = this.getSelf().id;
       this.contactsIndex.indexObject(userId, this.getUserSearchText(userId));
     });
@@ -118,11 +131,11 @@ export class AppUsersManager {
     appStateManager.getState().then((state) => {
       const users = appStateManager.storagesResults.users;
       if(users.length) {
-        this.users = {};
         for(let i = 0, length = users.length; i < length; ++i) {
           const user = users[i];
           if(user) {
             this.users[user.id] = user;
+            this.setUserNameToCache(user);
           }
         }
       }
@@ -134,28 +147,65 @@ export class AppUsersManager {
         });
 
         if(contactsList.length) {
-          this.contactsFillPromise = Promise.resolve(this.contactsList);
+          this.contactsFillPromise = deferredPromise();
+          this.contactsFillPromise.resolve(this.contactsList);
         }
       }
 
-      appStateManager.addEventListener('peerNeeded', (peerId: number) => {
-        if(peerId < 0 || this.storage.getFromCache(peerId)) {
+      appStateManager.addEventListener('peerNeeded', (peerId) => {
+        if(!appPeersManager.isUser(peerId)) {
           return;
         }
-
-        this.storage.set({
-          [peerId]: this.getUser(peerId)
-        });
+        
+        const userId = peerId.toUserId();
+        if(!this.storage.getFromCache(userId)) {
+          this.storage.set({
+            [userId]: this.getUser(userId)
+          });
+        }
       });
 
-      appStateManager.addEventListener('peerUnneeded', (peerId: number) => {
-        if(peerId < 0 || !this.storage.getFromCache(peerId)) {
+      appStateManager.addEventListener('peerUnneeded', (peerId) => {
+        if(!appPeersManager.isUser(peerId)) {
           return;
         }
 
-        this.storage.delete(peerId);
+        const userId = peerId.toUserId();
+        if(this.storage.getFromCache(userId)) {
+          this.storage.delete(userId);
+        }
       });
     });
+  }
+
+  public clear(init = false) {
+    if(!init) {
+      const users = appStateManager.storagesResults.users;
+      for(const userId in this.users) {
+        // const userId = +userId;
+        if(!userId) continue;
+        const peerId = userId.toPeerId();
+        if(!appStateManager.isPeerNeeded(peerId)) {
+          const user = this.users[userId];
+          if(user.username) {
+            delete this.usernames[cleanUsername(user.username)];
+          }
+
+          findAndSplice(users, (user) => user.id === userId);
+          this.storage.delete(userId);
+          delete this.users[userId];
+        }
+      }
+    } else {
+      this.users = {};
+      this.usernames = {};
+    }
+    
+    this.getTopPeersPromises = {};
+    this.contactsIndex = this.createSearchIndex();
+    this.contactsFillPromise = undefined;
+    this.contactsList = new Set();
+    this.updatedContactsList = false;
   }
 
   private onContactsModified() {
@@ -165,13 +215,19 @@ export class AppUsersManager {
 
   public fillContacts() {
     if(this.contactsFillPromise && this.updatedContactsList) {
-      return this.contactsFillPromise;
+      return {
+        cached: this.contactsFillPromise.isFulfilled,
+        promise: this.contactsFillPromise
+      };
     }
 
     this.updatedContactsList = true;
 
-    const promise = apiManager.invokeApi('contacts.getContacts').then((result) => {
+    const promise = deferredPromise<Set<UserId>>();
+    apiManager.invokeApi('contacts.getContacts').then((result) => {
       if(result._ === 'contacts.contacts') {
+        this.contactsList.clear();
+      
         this.saveApiUsers(result.users);
 
         result.contacts.forEach((contact) => {
@@ -179,17 +235,22 @@ export class AppUsersManager {
         });
 
         this.onContactsModified();
+
+        this.contactsFillPromise = promise;
       }
 
-      this.contactsFillPromise = promise;
-
-      return this.contactsList;
+      promise.resolve(this.contactsList);
+    }, () => {
+      this.updatedContactsList = false;
     });
 
-    return this.contactsFillPromise || (this.contactsFillPromise = promise);
+    return {
+      cached: this.contactsFillPromise?.isFulfilled,
+      promise: this.contactsFillPromise || (this.contactsFillPromise = promise)
+    };
   }
 
-  public resolveUsername(username: string) {
+  public resolveUsername(username: string): Promise<Chat | User> {
     if(username[0] === '@') {
       username = username.slice(1);
     }
@@ -200,20 +261,36 @@ export class AppUsersManager {
     }
 
     return apiManager.invokeApi('contacts.resolveUsername', {username}).then(resolvedPeer => {
-      this.saveApiUsers(resolvedPeer.users);
-      appChatsManager.saveApiChats(resolvedPeer.chats);
-
-      return appPeersManager.getPeer(appPeersManager.getPeerId(resolvedPeer.peer));
+      return this.processResolvedPeer(resolvedPeer);
     });
   }
 
-  public pushContact(userId: number) {
-    this.contactsList.add(userId);
-    this.contactsIndex.indexObject(userId, this.getUserSearchText(userId));
-    appStateManager.requestPeer(userId, 'contacts');
+  private processResolvedPeer(resolvedPeer: ContactsResolvedPeer.contactsResolvedPeer) {
+    this.saveApiUsers(resolvedPeer.users);
+    appChatsManager.saveApiChats(resolvedPeer.chats);
+
+    return appPeersManager.getPeer(appPeersManager.getPeerId(resolvedPeer.peer)) as Chat | User;
   }
 
-  public getUserSearchText(id: number) {
+  public resolvePhone(phone: string) {
+    return apiManager.invokeApi('contacts.resolvePhone', {phone}).then(resolvedPeer => {
+      return this.processResolvedPeer(resolvedPeer) as User;
+    });
+  }
+
+  public pushContact(id: UserId) {
+    this.contactsList.add(id);
+    this.contactsIndex.indexObject(id, this.getUserSearchText(id));
+    appStateManager.requestPeerSingle(id.toPeerId(), 'contact');
+  }
+
+  public popContact(id: UserId) {
+    this.contactsList.delete(id);
+    this.contactsIndex.indexObject(id, ''); // delete search index
+    appStateManager.releaseSinglePeer(id.toPeerId(), 'contact');
+  }
+
+  public getUserSearchText(id: UserId) {
     const user = this.users[id];
     if(!user) {
       return '';
@@ -231,8 +308,8 @@ export class AppUsersManager {
     return arr.filter(Boolean).join(' ');
   }
 
-  public getContacts(query?: string, includeSaved = false) {
-    return this.fillContacts().then(_contactsList => {
+  public getContacts(query?: string, includeSaved = false, sortBy: 'name' | 'online' | 'none' = 'name') {
+    return this.fillContacts().promise.then(_contactsList => {
       let contactsList = [..._contactsList];
       if(query) {
         const results = this.contactsIndex.search(query);
@@ -241,46 +318,50 @@ export class AppUsersManager {
         contactsList = filteredContactsList;
       }
 
-      contactsList.sort((userId1: number, userId2: number) => {
-        const sortName1 = (this.users[userId1] || {}).sortName || '';
-        const sortName2 = (this.users[userId2] || {}).sortName || '';
-
-        return sortName1.localeCompare(sortName2);
-      });
-
-      if(includeSaved) {
-        if(this.testSelfSearch(query)) {
-          contactsList.findAndSplice(p => p === rootScope.myId);
-          contactsList.unshift(rootScope.myId);
-        }
+      if(sortBy === 'name') {
+        contactsList.sort((userId1, userId2) => {
+          const sortName1 = (this.users[userId1] || {}).sortName || '';
+          const sortName2 = (this.users[userId2] || {}).sortName || '';
+          return sortName1.localeCompare(sortName2);
+        });
+      } else if(sortBy === 'online') {
+        contactsList.sort((userId1, userId2) => {
+          const status1 = appUsersManager.getUserStatusForSort(appUsersManager.getUser(userId1).status);
+          const status2 = appUsersManager.getUserStatusForSort(appUsersManager.getUser(userId2).status);
+          return status2 - status1;
+        });
       }
 
-      /* contactsList.sort((userId1: number, userId2: number) => {
-        const sortName1 = (this.users[userId1] || {}).sortName || '';
-        const sortName2 = (this.users[userId2] || {}).sortName || '';
-        if(sortName1 === sortName2) {
-          return 0;
-        } 
-        
-        return sortName1 > sortName2 ? 1 : -1;
-      }); */
+      const myUserId = rootScope.myId.toUserId();
+      indexOfAndSplice(contactsList, myUserId);
+      if(includeSaved) {
+        if(this.testSelfSearch(query)) {
+          contactsList.unshift(myUserId);
+        }
+      }
 
       return contactsList;
     });
   }
 
-  public toggleBlock(peerId: number, block: boolean) {
-    return apiManager.invokeApi(block ? 'contacts.block' : 'contacts.unblock', {
+  public getContactsPeerIds(
+    query?: Parameters<AppUsersManager['getContacts']>[0], 
+    includeSaved?: Parameters<AppUsersManager['getContacts']>[1], 
+    sortBy?: Parameters<AppUsersManager['getContacts']>[2]) {
+    return this.getContacts(query, includeSaved, sortBy).then(userIds => {
+      return userIds.map(userId => userId.toPeerId(false));
+    });
+  }
+
+  public toggleBlock(peerId: PeerId, block: boolean) {
+    return apiManager.invokeApiSingle(block ? 'contacts.block' : 'contacts.unblock', {
       id: appPeersManager.getInputPeerById(peerId)
     }).then(value => {
       if(value) {
-        apiUpdatesManager.processUpdateMessage({
-          _: 'updateShort',
-          update: {
-            _: 'updatePeerBlocked',
-            peer_id: appPeersManager.getOutputPeer(peerId),
-            blocked: block
-          } as Update.updatePeerBlocked
+        apiUpdatesManager.processLocalUpdate({
+          _: 'updatePeerBlocked',
+          peer_id: appPeersManager.getOutputPeer(peerId),
+          blocked: block
         });
       }
 
@@ -290,13 +371,38 @@ export class AppUsersManager {
 
   public testSelfSearch(query: string) {
     const user = this.getSelf();
-    const index = new SearchIndex();
+    const index = this.createSearchIndex();
     index.indexObject(user.id, this.getUserSearchText(user.id));
     return index.search(query).has(user.id);
   }
 
-  public saveApiUsers(apiUsers: any[], override?: boolean) {
+  private createSearchIndex() {
+    return new SearchIndex<UserId>({
+      clearBadChars: true,
+      ignoreCase: true,
+      latinize: true,
+      includeTag: true
+    });
+  }
+
+  public saveApiUsers(apiUsers: MTUser[], override?: boolean) {
+    if((apiUsers as any).saved) return;
+    (apiUsers as any).saved = true;
     apiUsers.forEach((user) => this.saveApiUser(user, override));
+  }
+
+  private setUserNameToCache(user: MTUser.user, oldUser?: MTUser.user) {
+    if(!oldUser || oldUser.username !== user.username) {
+      if(oldUser?.username) {
+        const oldSearchUsername = cleanUsername(oldUser.username);
+        delete this.usernames[oldSearchUsername];
+      }
+
+      if(user.username) {
+        const searchUsername = cleanUsername(user.username);
+        this.usernames[searchUsername] = user.id;
+      }
+    }
   }
 
   public saveApiUser(user: MTUser, override?: boolean) {
@@ -305,9 +411,11 @@ export class AppUsersManager {
     const userId = user.id;
     const oldUser = this.users[userId];
 
-    if(oldUser && !override) {
-      return;
-    }
+    // ! commented block can affect performance !
+    // if(oldUser && !override) {
+    //   console.log('saveApiUser same');
+    //   return;
+    // }
 
     if(user.pFlags === undefined) {
       user.pFlags = {};
@@ -320,15 +428,18 @@ export class AppUsersManager {
     // * exclude from state
     // defineNotNumerableProperties(user, ['initials', 'num', 'rFirstName', 'rFullName', 'rPhone', 'sortName', 'sortStatus']);
 
-    const fullName = user.first_name + ' ' + (user.last_name || '');
-    if(user.username) {
-      const searchUsername = cleanUsername(user.username);
-      this.usernames[searchUsername] = userId;
+    this.setUserNameToCache(user, oldUser);
+
+    if(!oldUser 
+      || oldUser.sortName === undefined 
+      || oldUser.first_name !== user.first_name 
+      || oldUser.last_name !== user.last_name) {
+      const fullName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+
+      user.sortName = user.pFlags.deleted ? '' : cleanSearchText(fullName, false);
+    } else {
+      user.sortName = oldUser.sortName;
     }
-
-    user.sortName = user.pFlags.deleted ? '' : cleanSearchText(fullName, false);
-
-    user.initials = RichTextProcessor.getAbbreviation(fullName);
 
     if(user.status) {
       if((user.status as UserStatus.userStatusOnline).expires) {
@@ -342,7 +453,7 @@ export class AppUsersManager {
 
     //user.sortStatus = user.pFlags.bot ? -1 : this.getUserStatusForSort(user.status);
 
-    let changedTitle = false;
+    let changedPhoto = false, changedTitle = false;
     if(oldUser === undefined) {
       this.users[userId] = user;
     } else {
@@ -352,23 +463,40 @@ export class AppUsersManager {
         changedTitle = true;
       }
 
+      const oldPhotoId = (oldUser.photo as UserProfilePhoto.userProfilePhoto)?.photo_id;
+      const newPhotoId = (user.photo as UserProfilePhoto.userProfilePhoto)?.photo_id;
+      if(oldPhotoId !== newPhotoId) {
+        changedPhoto = true;
+      }
+
       /* if(user.pFlags.bot && user.bot_info_version !== oldUser.bot_info_version) {
         
       } */
 
+      const wasContact = !!oldUser.pFlags.contact;
+      const newContact = !!user.pFlags.contact;
+
       safeReplaceObject(oldUser, user);
-      rootScope.broadcast('user_update', userId);
+      rootScope.dispatchEvent('user_update', userId);
+
+      if(wasContact !== newContact) {
+        this.onContactUpdated(userId, newContact, wasContact);
+      }
+    }
+
+    if(changedPhoto) {
+      rootScope.dispatchEvent('avatar_update', user.id.toPeerId());
     }
 
     if(changedTitle) {
-      rootScope.broadcast('peer_title_edit', user.id);
+      rootScope.dispatchEvent('peer_title_edit', user.id.toPeerId());
     }
 
     this.setUserToStateIfNeeded(user);
   }
 
   public setUserToStateIfNeeded(user: User) {
-    if(appStateManager.isPeerNeeded(user.id)) {
+    if(appStateManager.isPeerNeeded(user.id.toPeerId())) {
       this.storage.set({
         [user.id]: user
       });
@@ -379,8 +507,12 @@ export class AppUsersManager {
     return '+' + formatPhoneNumber(phone).formatted;
   }
 
-  public getUserStatusForSort(status: User['status'] | number) {
-    if(typeof(status) === 'number') {
+  public isUserOnlineVisible(id: UserId) {
+    return this.getUserStatusForSort(id) > 3;
+  }
+
+  public getUserStatusForSort(status: User['status'] | UserId) {
+    if(typeof(status) !== 'object') {
       status = this.getUser(status).status;
     }
 
@@ -412,36 +544,36 @@ export class AppUsersManager {
     return 0;
   }
 
-  public getUser(id: any): User {
-    if(isObject(id)) {
+  public getUser(id: User | UserId) {
+    if(isObject<User>(id)) {
       return id;
     }
 
-    return this.users[id] || {id: id, pFlags: {deleted: true}, access_hash: ''} as User;
+    return this.users[id] || {_: 'userEmpty', id, pFlags: {deleted: true}, access_hash: ''} as any as User;
   }
 
   public getSelf() {
     return this.getUser(rootScope.myId);
   }
 
-  public getUserStatusString(userId: number): HTMLElement {
+  public getUserStatusString(id: UserId): HTMLElement {
     let key: LangPackKey;
     let args: any[];
 
-    switch(userId) {
+    switch(id) {
       case REPLIES_PEER_ID:
         key = 'Peer.RepliesNotifications';
         break;
-      case 777000:
+      case SERVICE_PEER_ID:
         key = 'Peer.ServiceNotifications';
         break;
       default: {
-        if(this.isBot(userId)) {
+        if(this.isBot(id)) {
           key = 'Bot';
           break;
         }
 
-        const user = this.getUser(userId);
+        const user = this.getUser(id);
         if(!user) {
           key = '' as any;
           break;
@@ -470,23 +602,24 @@ export class AppUsersManager {
           
           case 'userStatusOffline': {
             const date = user.status.was_online;
-            const now = Date.now() / 1000;
+            const today = new Date();
+            const now = today.getTime() / 1000 | 0;
             
-            if((now - date) < 60) {
+            const diff = now - date;
+            if(diff < 60) {
               key = 'Peer.Status.justNow';
-            } else if((now - date) < 3600) {
+            } else if(diff < 3600) {
               key = 'Peer.Status.minAgo';
-              const c = (now - date) / 60 | 0;
+              const c = diff / 60 | 0;
               args = [c];
-            } else if(now - date < 86400) {
+            } else if(diff < 86400 && today.getDate() === new Date(date * 1000).getDate()) {
               key = 'LastSeen.HoursAgo';
-              const c = (now - date) / 3600 | 0;
+              const c = diff / 3600 | 0;
               args = [c];
             } else {
               key = 'Peer.Status.LastSeenAt';
-              const d = new Date(date * 1000);
-              args = [('0' + d.getDate()).slice(-2) + '.' + ('0' + (d.getMonth() + 1)).slice(-2), 
-                ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2)];
+              const {dateEl, timeEl} = formatFullSentTimeRaw(date);
+              args = [dateEl, timeEl];
             }
             
             break;
@@ -510,34 +643,34 @@ export class AppUsersManager {
     return i18n(key, args);
   }
 
-  public isBot(id: number) {
-    return this.users[id] && this.users[id].pFlags.bot;
+  public isBot(id: UserId) {
+    return this.users[id] && !!this.users[id].pFlags.bot;
   }
 
-  public isContact(id: number) {
-    return this.contactsList.has(id);
+  public isContact(id: UserId) {
+    return this.contactsList.has(id) || !!(this.users[id] && this.users[id].pFlags.contact);
   }
   
-  public isRegularUser(id: number) {
+  public isRegularUser(id: UserId) {
     const user = this.users[id];
     return user && !this.isBot(id) && !user.pFlags.deleted && !user.pFlags.support;
   }
 
-  public isNonContactUser(id: number) {
-    return this.isRegularUser(id) && !this.isContact(id) && id !== rootScope.myId;
+  public isNonContactUser(id: UserId) {
+    return this.isRegularUser(id) && !this.isContact(id) && id.toPeerId() !== rootScope.myId;
   }
 
-  public hasUser(id: number, allowMin?: boolean) {
-    var user = this.users[id];
+  public hasUser(id: UserId, allowMin?: boolean) {
+    const user = this.users[id];
     return isObject(user) && (allowMin || !user.pFlags.min);
   }
 
-  public canSendToUser(id: number) {
+  public canSendToUser(id: UserId) {
     const user = this.getUser(id);
-    return !user.pFlags.deleted && user.username !== 'replies';
+    return !user.pFlags.deleted && user.id.toPeerId() !== REPLIES_PEER_ID;
   }
 
-  public getUserPhoto(id: number) {
+  public getUserPhoto(id: UserId) {
     const user = this.getUser(id);
 
     return user && user.photo || {
@@ -545,12 +678,12 @@ export class AppUsersManager {
     };
   }
 
-  public getUserString(id: number) {
+  public getUserString(id: UserId) {
     const user = this.getUser(id);
     return 'u' + id + (user.access_hash ? '_' + user.access_hash : '');
   }
 
-  public getUserInput(id: number): InputUser {
+  public getUserInput(id: UserId): InputUser {
     const user = this.getUser(id);
     if(user.pFlags && user.pFlags.self) {
       return {_: 'inputUserSelf'};
@@ -563,24 +696,52 @@ export class AppUsersManager {
     };
   }
 
+  public getUserInputPeer(id: UserId): InputPeer.inputPeerSelf | InputPeer.inputPeerUser {
+    const user = this.getUser(id);
+    if(user.pFlags && user.pFlags.self) {
+      return {_: 'inputPeerSelf'};
+    }
+
+    return {
+      _: 'inputPeerUser',
+      user_id: id,
+      access_hash: user.access_hash
+    };
+  }
+
+  public getContactMediaInput(id: UserId): InputMedia.inputMediaContact {
+    const user = this.getUser(id);
+
+    return {
+      _: 'inputMediaContact',
+      first_name: user.first_name,
+      last_name: user.last_name,
+      phone_number: user.phone,
+      vcard: '',
+      user_id: id
+    };
+  }
+
   public updateUsersStatuses = () => {
     const timestampNow = tsNow(true);
     for(const i in this.users) {
       const user = this.users[i];
-
-      if(user.status &&
-        user.status._ === 'userStatusOnline' &&
-        user.status.expires < timestampNow) {
-
-        user.status = {_: 'userStatusOffline', was_online: user.status.expires};
-        rootScope.broadcast('user_update', user.id);
-
-        this.setUserToStateIfNeeded(user);
-      }
+      this.updateUserStatus(user, timestampNow);
     }
   };
 
-  public forceUserOnline(id: number, eventTimestamp?: number) {
+  public updateUserStatus(user: MTUser.user, timestampNow = tsNow(true)) {
+    if(user.status &&
+      user.status._ === 'userStatusOnline' &&
+      user.status.expires < timestampNow) {
+      user.status = {_: 'userStatusOffline', was_online: user.status.expires};
+      rootScope.dispatchEvent('user_update', user.id);
+
+      this.setUserToStateIfNeeded(user);
+    }
+  }
+
+  public forceUserOnline(id: UserId, eventTimestamp?: number) {
     if(this.isBot(id)) {
       return;
     }
@@ -609,127 +770,130 @@ export class AppUsersManager {
       };
       
       //user.sortStatus = this.getUserStatusForSort(user.status);
-      rootScope.broadcast('user_update', id);
+      rootScope.dispatchEvent('user_update', id);
 
       this.setUserToStateIfNeeded(user);
     }
   }
 
-  /* function importContact (phone, firstName, lastName) {
-      return MtpApiManager.invokeApi('contacts.importContacts', {
-        contacts: [{
-          _: 'inputPhoneContact',
-          client_id: '1',
-          phone: phone,
-          first_name: firstName,
-          last_name: lastName
-        }],
-        replace: false
-      }).then(function (importedContactsResult) {
-        saveApiUsers(importedContactsResult.users)
+  public importContact(first_name: string, last_name: string, phone: string) {
+    return this.importContacts([{
+      first_name,
+      last_name,
+      phones: [phone]
+    }]).then(userIds => {
+      if(!userIds.length) {
+        const error = new Error();
+        (error as any).type = 'NO_USER';
+        throw error;
+      }
 
-        var foundUserID = false
-        angular.forEach(importedContactsResult.imported, function (importedContact) {
-          onContactUpdated(foundUserID = importedContact.user_id, true)
-        })
-
-        return foundUserID || false
-      })
+      return userIds[0];
+    });
   }
 
-  function importContacts (contacts) {
-    var inputContacts = [],
-      i
-    var j
+  public importContacts(contacts: {phones: string[], first_name: string, last_name: string}[]) {
+    const inputContacts: InputContact[] = [];
 
-    for (i = 0; i < contacts.length; i++) {
-      for (j = 0; j < contacts[i].phones.length; j++) {
+    for(let i = 0; i < contacts.length; ++i) {
+      for(let j = 0; j < contacts[i].phones.length; ++j) {
         inputContacts.push({
           _: 'inputPhoneContact',
           client_id: (i << 16 | j).toString(10),
           phone: contacts[i].phones[j],
           first_name: contacts[i].first_name,
           last_name: contacts[i].last_name
-        })
+        });
       }
     }
 
-    return MtpApiManager.invokeApi('contacts.importContacts', {
-      contacts: inputContacts,
-      replace: false
-    }).then(function (importedContactsResult) {
-      saveApiUsers(importedContactsResult.users)
+    return apiManager.invokeApi('contacts.importContacts', {
+      contacts: inputContacts
+    }).then((importedContactsResult) => {
+      this.saveApiUsers(importedContactsResult.users);
 
-      var result = []
-      angular.forEach(importedContactsResult.imported, function (importedContact) {
-        onContactUpdated(importedContact.user_id, true)
-        result.push(importedContact.user_id)
-      })
-
-      return result
-    })
-  } */
-
-  /* public deleteContacts(userIds: number[]) {
-    var ids: any[] = [];
-    userIds.forEach((userId) => {
-      ids.push(this.getUserInput(userId));
-    })
-
-    return apiManager.invokeApi('contacts.deleteContacts', {
-      id: ids
-    }).then(() => {
-      userIds.forEach((userId) => {
-        this.onContactUpdated(userId, false);
+      const userIds = importedContactsResult.imported.map((importedContact) => {
+        this.onContactUpdated(importedContact.user_id, true);
+        return importedContact.user_id;
       });
+
+      return userIds;
     });
-  } */
+  }
 
-  public getTopPeers(): Promise<number[]> {
-    if(this.getTopPeersPromise) return this.getTopPeersPromise;
+  public getTopPeers(type: TopPeerType) {
+    if(this.getTopPeersPromises[type]) return this.getTopPeersPromises[type];
 
-    return this.getTopPeersPromise = appStateManager.getState().then((state) => {
-      if(state?.topPeers?.length) {
-        return state.topPeers;
+    return this.getTopPeersPromises[type] = appStateManager.getState().then((state) => {
+      const cached = state.topPeersCache[type];
+      if(cached && (cached.cachedTime + 86400e3) > Date.now() && cached.peers) {
+        return cached.peers;
       }
 
       return apiManager.invokeApi('contacts.getTopPeers', {
-        correspondents: true,
+        [type]: true,
         offset: 0,
         limit: 15,
-        hash: 0,
+        hash: '0'
       }).then((result) => {
-        let peerIds: number[] = [];
+        let topPeers: MyTopPeer[] = [];
         if(result._ === 'contacts.topPeers') {
           //console.log(result);
           this.saveApiUsers(result.users);
           appChatsManager.saveApiChats(result.chats);
 
           if(result.categories.length) {
-            peerIds = result.categories[0].peers.map((topPeer) => {
+            topPeers = result.categories[0].peers.map((topPeer) => {
               const peerId = appPeersManager.getPeerId(topPeer.peer);
               appStateManager.requestPeer(peerId, 'topPeer');
-              return peerId;
+              return {id: peerId, rating: topPeer.rating};
             });
           }
         }
   
-        appStateManager.pushToState('topPeers', peerIds);
+        state.topPeersCache[type] = {
+          peers: topPeers,
+          cachedTime: Date.now()
+        };
+        appStateManager.pushToState('topPeersCache', state.topPeersCache);
   
-        return peerIds;
+        return topPeers;
       });
     });
   }
 
   public getBlocked(offset = 0, limit = 0) {
-    return apiManager.invokeApi('contacts.getBlocked', {offset, limit}).then(contactsBlocked => {
+    return apiManager.invokeApiSingle('contacts.getBlocked', {offset, limit}).then(contactsBlocked => {
       this.saveApiUsers(contactsBlocked.users);
       appChatsManager.saveApiChats(contactsBlocked.chats);
       const count = contactsBlocked._ === 'contacts.blocked' ? contactsBlocked.users.length + contactsBlocked.chats.length : contactsBlocked.count;
 
-      const peerIds = contactsBlocked.users.map(u => u.id).concat(contactsBlocked.chats.map(c => -c.id));
+      const peerIds: PeerId[] = contactsBlocked.users.map(u => u.id.toPeerId()).concat(contactsBlocked.chats.map(c => c.id.toPeerId(true)));
 
       return {count, peerIds};
+    });
+  }
+
+  public getLocated(
+    lat: number, 
+    long: number,
+    accuracy_radius: number,
+    background: boolean = false,
+    self_expires: number = 0
+  ) {
+    const geo_point: InputGeoPoint = {
+      _: 'inputGeoPoint',
+      lat,
+      long,
+      accuracy_radius
+    };
+
+    return apiManager.invokeApi('contacts.getLocated', {
+      geo_point, 
+      background
+    }).then((updates) => {
+      apiUpdatesManager.processUpdateMessage(updates);
+      return updates;
     });
   }
 
@@ -758,15 +922,27 @@ export class AppUsersManager {
     });
   } */
   public searchContacts(query: string, limit = 20) {
-    return apiManager.invokeApi('contacts.search', {
+    // handle 't.me/username' as 'username'
+    const entities = RichTextProcessor.parseEntities(query);
+    if(entities.length && entities[0].length === query.trim().length && entities[0]._ === 'messageEntityUrl') {
+      try {
+        const url = new URL(RichTextProcessor.wrapUrl(query).url);
+        const path = url.pathname.slice(1);
+        if(path) {
+          query = path;
+        }
+      } catch(err) {}
+    }
+
+    return apiManager.invokeApiCacheable('contacts.search', {
       q: query,
       limit
-    }).then(peers => {
+    }, {cacheSeconds: 60}).then(peers => {
       this.saveApiUsers(peers.users);
       appChatsManager.saveApiChats(peers.chats);
 
       const out = {
-        my_results: [...new Set(peers.my_results.map(p => appPeersManager.getPeerId(p)))], // ! contacts.search returns duplicates in my_results
+        my_results: filterUnique(peers.my_results.map(p => appPeersManager.getPeerId(p))), // ! contacts.search returns duplicates in my_results
         results: peers.results.map(p => appPeersManager.getPeerId(p))
       };
 
@@ -774,18 +950,17 @@ export class AppUsersManager {
     });
   }
 
-  private onContactUpdated(userId: number, isContact: boolean) {
-    const curIsContact = this.isContact(userId);
+  private onContactUpdated(userId: UserId, isContact: boolean, curIsContact = this.isContact(userId)) {
     if(isContact !== curIsContact) {
       if(isContact) {
         this.pushContact(userId);
       } else {
-        this.contactsList.delete(userId);
+        this.popContact(userId);
       }
 
       this.onContactsModified();
 
-      rootScope.broadcast('contacts_update', userId);
+      rootScope.dispatchEvent('contacts_update', userId);
     }
   }
 
@@ -797,28 +972,38 @@ export class AppUsersManager {
     });
   }
 
-  public setUserStatus(userId: number, offline: boolean) {
+  public setUserStatus(userId: UserId, offline: boolean) {
     if(this.isBot(userId)) {
       return;
     }
 
     const user = this.users[userId];
     if(user) {
-      const status: any = offline ? {
+      const status: UserStatus = offline ? {
         _: 'userStatusOffline',
         was_online: tsNow(true)
       } : {
         _: 'userStatusOnline',
-        expires: tsNow(true) + 500
+        expires: tsNow(true) + 50
       };
 
       user.status = status;
       //user.sortStatus = this.getUserStatusForSort(user.status);
-      rootScope.broadcast('user_update', userId);
+      rootScope.dispatchEvent('user_update', userId);
+
+      this.setUserToStateIfNeeded(user);
     }
   }
 
-  public addContact(userId: number, first_name: string, last_name: string, phone: string, showPhone?: true) {
+  public addContact(userId: UserId, first_name: string, last_name: string, phone: string, showPhone?: true) {
+    /* if(!userId) {
+      return this.importContacts([{
+        first_name,
+        last_name,
+        phones: [phone]
+      }]);
+    } */
+
     return apiManager.invokeApi('contacts.addContact', {
       id: this.getUserInput(userId),
       first_name,
@@ -832,7 +1017,7 @@ export class AppUsersManager {
     });
   }
 
-  public deleteContacts(userIds: number[]) {
+  public deleteContacts(userIds: UserId[]) {
     return apiManager.invokeApi('contacts.deleteContacts', {
       id: userIds.map(userId => this.getUserInput(userId))
     }).then((updates) => {
@@ -842,6 +1027,13 @@ export class AppUsersManager {
         this.onContactUpdated(userId, false);
       });
     });
+  }
+
+  public isRestricted(userId: UserId) {
+    const user: MTUser.user = this.getUser(userId);
+    const restrictionReasons = user.restriction_reason;
+
+    return !!(user.pFlags.restricted && restrictionReasons && isRestricted(restrictionReasons));
   }
 }
 

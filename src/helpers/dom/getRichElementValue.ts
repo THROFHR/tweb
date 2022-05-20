@@ -11,41 +11,89 @@
 
 import { MessageEntity } from "../../layer";
 
-export type MarkdownType = 'bold' | 'italic' | 'underline' | 'strikethrough' | 'monospace' | 'link';
+export type MarkdownType = 'bold' | 'italic' | 'underline' | 'strikethrough' | 'monospace' | 'link' | 'mentionName' | 'spoiler';
 export type MarkdownTag = {
   match: string,
-  entityName: 'messageEntityBold' | 'messageEntityUnderline' | 'messageEntityItalic' | 'messageEntityPre' | 'messageEntityStrike' | 'messageEntityTextUrl';
+  entityName: Extract<MessageEntity['_'], 'messageEntityBold' | 'messageEntityUnderline' | 'messageEntityItalic' | 'messageEntityCode' | 'messageEntityStrike' | 'messageEntityTextUrl' | 'messageEntityMentionName' | 'messageEntitySpoiler'>;
 };
+
+// https://core.telegram.org/bots/api#html-style
 export const markdownTags: {[type in MarkdownType]: MarkdownTag} = {
   bold: {
-    match: '[style*="font-weight"], b',
+    match: '[style*="bold"], [style*="font-weight: 700"], [style*="font-weight: 600"], [style*="font-weight:700"], [style*="font-weight:600"], b, strong',
     entityName: 'messageEntityBold'
   },
   underline: {
-    match: '[style*="underline"], u',
+    match: '[style*="underline"], u, ins',
     entityName: 'messageEntityUnderline'
   },
   italic: {
-    match: '[style*="italic"], i',
+    match: '[style*="italic"], i, em',
     entityName: 'messageEntityItalic'
   },
   monospace: {
-    match: '[style*="monospace"], [face="monospace"]',
-    entityName: 'messageEntityPre'
+    match: '[style*="monospace"], [face*="monospace"], pre',
+    entityName: 'messageEntityCode'
   },
   strikethrough: {
-    match: '[style*="line-through"], strike',
+    match: '[style*="line-through"], strike, del, s',
     entityName: 'messageEntityStrike'
   },
   link: {
-    match: 'A',
+    match: 'A:not(.follow)',
     entityName: 'messageEntityTextUrl'
+  },
+  mentionName: {
+    match: 'A.follow',
+    entityName: 'messageEntityMentionName'
+  },
+  spoiler: {
+    match: '[style*="spoiler"]',
+    entityName: 'messageEntitySpoiler'
   }
 };
 
+const tabulationMatch = '[style*="table-cell"], th, td';
+
+/* export function getDepth(child: Node, container?: Node) {
+  let depth = 0;
+
+  do {
+    if(child === container) {
+      return depth;
+    }
+
+    ++depth;
+  } while((child = child.parentNode) !== null);
+
+  return depth;
+} */
+
+const BLOCK_TAG_NAMES = new Set([
+  'DIV',
+  'P',
+  'BR',
+  'LI',
+  'SECTION',
+  'H6',
+  'H5',
+  'H4',
+  'H3',
+  'H2',
+  'H1',
+  'TR'
+]);
+
 export default function getRichElementValue(node: HTMLElement, lines: string[], line: string[], selNode?: Node, selOffset?: number, entities?: MessageEntity[], offset = {offset: 0}) {
   if(node.nodeType === 3) { // TEXT
-    const nodeValue = node.nodeValue;
+    let nodeValue = node.nodeValue;
+
+    /* const tabulation = node.parentElement?.closest(tabulationMatch + ', [contenteditable]');
+    if(tabulation?.getAttribute('contenteditable') === null) {
+      nodeValue += ' ';
+      // line.push('\t');
+      // ++offset.offset;
+    } */
 
     if(selNode === node) {
       line.push(nodeValue.substr(0, selOffset) + '\x01' + nodeValue.substr(selOffset));
@@ -53,35 +101,50 @@ export default function getRichElementValue(node: HTMLElement, lines: string[], 
       line.push(nodeValue);
     }
 
-    if(entities && nodeValue.trim()) {
+    if(entities && nodeValue.length) {
       if(node.parentNode) {
         const parentElement = node.parentElement;
         
+        // let closestTag: MarkdownTag, closestElementByTag: Element, closestDepth = Infinity;
         for(const type in markdownTags) {
           const tag = markdownTags[type as MarkdownType];
           const closest = parentElement.closest(tag.match + ', [contenteditable]');
-          if(closest && closest.getAttribute('contenteditable') === null) {
-            if(tag.entityName === 'messageEntityTextUrl') {
-              entities.push({
-                _: tag.entityName as any,
-                url: (parentElement as HTMLAnchorElement).href,
-                offset: offset.offset,
-                length: nodeValue.length
-              });
-            } else {
-              entities.push({
-                _: tag.entityName as any,
-                offset: offset.offset,
-                length: nodeValue.length
-              });
-            }
+          if(closest?.getAttribute('contenteditable') !== null) {
+            /* const depth = getDepth(closest, parentElement.closest('[contenteditable]'));
+            if(closestDepth > depth) {
+              closestDepth = depth;
+              closestTag = tag;
+              closestElementByTag = closest;
+            } */
+            continue;
+          }
+
+          if(tag.entityName === 'messageEntityTextUrl') {
+            entities.push({
+              _: tag.entityName,
+              url: (closest as HTMLAnchorElement).href,
+              offset: offset.offset,
+              length: nodeValue.length
+            });
+          } else if(tag.entityName === 'messageEntityMentionName') {
+            entities.push({
+              _: tag.entityName,
+              offset: offset.offset,
+              length: nodeValue.length,
+              user_id: (closest as HTMLElement).dataset.follow.toUserId()
+            });
+          } else {
+            entities.push({
+              _: tag.entityName,
+              offset: offset.offset,
+              length: nodeValue.length
+            });
           }
         }
       }
     }
 
     offset.offset += nodeValue.length;
-
     return;
   }
 
@@ -89,13 +152,14 @@ export default function getRichElementValue(node: HTMLElement, lines: string[], 
     return;
   }
 
-  const isSelected = (selNode === node);
-  const isBlock = node.tagName === 'DIV' || node.tagName === 'P';
-  if(isBlock && line.length || node.tagName === 'BR') {
+  const isSelected = selNode === node;
+  const isBlock = BLOCK_TAG_NAMES.has(node.tagName);
+  if(isBlock && line.length) {
     lines.push(line.join(''));
     line.splice(0, line.length);
-  } else if(node.tagName === 'IMG') {
-    const alt = (node as HTMLImageElement).alt;
+    ++offset.offset;
+  } else if(node instanceof HTMLImageElement) {
+    const alt = node.alt;
     if(alt) {
       line.push(alt);
       offset.offset += alt.length;
@@ -105,6 +169,9 @@ export default function getRichElementValue(node: HTMLElement, lines: string[], 
   if(isSelected && !selOffset) {
     line.push('\x01');
   }
+
+  const isTableCell = node.matches(tabulationMatch);
+  const wasEntitiesLength = entities?.length;
 
   let curChild = node.firstChild as HTMLElement;
   while(curChild) {
@@ -116,8 +183,27 @@ export default function getRichElementValue(node: HTMLElement, lines: string[], 
     line.push('\x01');
   }
 
-  if(isBlock && line.length) {
+  if(isTableCell && node.nextSibling) {
+    line.push(' ');
+    ++offset.offset;
+
+    // * combine entities such as url after adding space
+    if(wasEntitiesLength !== undefined) {
+      for(let i = wasEntitiesLength, length = entities.length; i < length; ++i) {
+        ++entities[i].length;
+      }
+    }
+  }
+
+  const wasLength = line.length;
+  if(isBlock && wasLength) {
     lines.push(line.join(''));
-    line.splice(0, line.length);
+    line.splice(0, wasLength);
+    ++offset.offset;
+  }
+
+  if(wasLength && node.tagName === 'P' && node.nextSibling) {
+    lines.push('');
+    ++offset.offset;
   }
 }

@@ -5,13 +5,13 @@
  */
 
 import { MOUNT_CLASS_TO } from "../config/debug";
-import Countries, { Country, PhoneCodesMain } from "../countries";
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { CLICK_EVENT_NAME } from "../helpers/dom/clickEvent";
 import ListenerSetter from "../helpers/listenerSetter";
 import mediaSizes from "../helpers/mediaSizes";
-import { isTouchSupported } from "../helpers/touchSupport";
-import { isApple, isMobileSafari, isSafari } from "../helpers/userAgent";
+import { IS_TOUCH_SUPPORTED } from "../environment/touchSupport";
+import { IS_APPLE, IS_MOBILE_SAFARI } from "../environment/userAgent";
+import rootScope from "../lib/rootScope";
 import appNavigationController from "./appNavigationController";
 
 export function putPreloader(elem: Element, returnDiv = false): HTMLElement {
@@ -48,38 +48,6 @@ export function setButtonLoader(elem: HTMLButtonElement, icon = 'check') {
     elem.classList.add('tgico-' + icon);
     elem.removeAttribute('disabled');
   };
-}
-
-let sortedCountries: Country[];
-export function formatPhoneNumber(str: string) {
-  str = str.replace(/\D/g, '');
-  let phoneCode = str.slice(0, 6);
-  
-  ////console.log('str', str, phoneCode);
-  if(!sortedCountries) {
-    sortedCountries = Countries.slice().sort((a, b) => b.phoneCode.length - a.phoneCode.length);
-  }
-  
-  let country = sortedCountries.find((c) => {
-    return c.phoneCode.split(' and ').find((c) => phoneCode.indexOf(c.replace(/\D/g, '')) === 0);
-  });
-
-  if(!country) return {formatted: str, country};
-
-  country = PhoneCodesMain[country.phoneCode] || country;
-  
-  let pattern = country.pattern || country.phoneCode;
-  pattern.split('').forEach((symbol, idx) => {
-    if(symbol === ' ' && str[idx] !== ' ' && str.length > idx) {
-      str = str.slice(0, idx) + ' ' + str.slice(idx);
-    }
-  });
-  
-  /* if(country.pattern) {
-    str = str.slice(0, country.pattern.length);
-  } */
-  
-  return {formatted: str, country};
 }
 
 /* export function parseMenuButtonsTo(to: {[name: string]: HTMLElement}, elements: HTMLCollection | NodeListOf<HTMLElement>) {
@@ -124,6 +92,8 @@ export const closeBtnMenu = () => {
     //openedMenu.previousElementSibling.remove(); // remove overlay
     if(menuOverlay) menuOverlay.remove();
     openedMenu = null;
+
+    rootScope.dispatchEvent('context_menu_toggle', false);
   }
   
   if(openedMenuOnClose) {
@@ -131,7 +101,7 @@ export const closeBtnMenu = () => {
     openedMenuOnClose = null;
   }
 
-  if(!isTouchSupported) {
+  if(!IS_TOUCH_SUPPORTED) {
     window.removeEventListener('mousemove', onMouseMove);
     //window.removeEventListener('keydown', onKeyDown, {capture: true});
     window.removeEventListener('contextmenu', onClick);
@@ -139,7 +109,7 @@ export const closeBtnMenu = () => {
 
   document.removeEventListener(CLICK_EVENT_NAME, onClick);
 
-  if(!isMobileSafari) {
+  if(!IS_MOBILE_SAFARI) {
     appNavigationController.removeByType('menu');
   }
 };
@@ -161,7 +131,7 @@ let openedMenu: HTMLElement = null, openedMenuOnClose: () => void = null, menuOv
 export function openBtnMenu(menuElement: HTMLElement, onClose?: () => void) {
   closeBtnMenu();
 
-  if(!isMobileSafari) {
+  if(!IS_MOBILE_SAFARI) {
     appNavigationController.pushItem({
       type: 'menu',
       onPop: (canAnimate) => {
@@ -191,7 +161,7 @@ export function openBtnMenu(menuElement: HTMLElement, onClose?: () => void) {
   
   openedMenuOnClose = onClose;
 
-  if(!isTouchSupported) {
+  if(!IS_TOUCH_SUPPORTED) {
     window.addEventListener('mousemove', onMouseMove);
     //window.addEventListener('keydown', onKeyDown, {capture: true});
     window.addEventListener('contextmenu', onClick, {once: true});
@@ -205,38 +175,66 @@ export function openBtnMenu(menuElement: HTMLElement, onClose?: () => void) {
   
   // ! safari iOS doesn't handle window click event on overlay, idk why
   document.addEventListener(CLICK_EVENT_NAME, onClick);
+
+  rootScope.dispatchEvent('context_menu_toggle', true);
 }
 
+export type MenuPositionPadding = {
+  top?: number, 
+  right?: number, 
+  bottom?: number, 
+  left?: number
+};
+
 const PADDING_TOP = 8;
+const PADDING_BOTTOM = PADDING_TOP;
 const PADDING_LEFT = 8;
-export function positionMenu({pageX, pageY}: MouseEvent | Touch, elem: HTMLElement, side?: 'left' | 'right' | 'center') {
+const PADDING_RIGHT = PADDING_LEFT;
+export function positionMenu({pageX, pageY}: MouseEvent | Touch, elem: HTMLElement, side?: 'left' | 'right' | 'center', additionalPadding?: MenuPositionPadding) {
   //let {clientX, clientY} = e;
 
   // * side mean the OPEN side
 
-  let {scrollWidth: menuWidth, scrollHeight: menuHeight} = elem;
+  const getScrollWidthFromElement = (Array.from(elem.children) as HTMLElement[]).find(element => element.classList.contains('btn-menu-item') && !element.classList.contains('hide')) || elem;
+
+  let {scrollWidth: menuWidth} = getScrollWidthFromElement;
+  let {scrollHeight: menuHeight} = elem;
   //let {innerWidth: windowWidth, innerHeight: windowHeight} = window;
   const rect = document.body.getBoundingClientRect();
   const windowWidth = rect.width;
   const windowHeight = rect.height;
 
+  let paddingTop = PADDING_TOP, paddingRight = PADDING_RIGHT, paddingBottom = PADDING_BOTTOM, paddingLeft = PADDING_LEFT;
+  if(additionalPadding) {
+    if(additionalPadding.top) paddingTop += additionalPadding.top;
+    if(additionalPadding.right) paddingRight += additionalPadding.right;
+    if(additionalPadding.bottom) paddingBottom += additionalPadding.bottom;
+    if(additionalPadding.left) paddingLeft += additionalPadding.left;
+  }
+
   side = mediaSizes.isMobile ? 'right' : 'left';
   let verticalSide: 'top' /* | 'bottom' */ | 'center' = 'top';
+
+  const maxTop = windowHeight - menuHeight - paddingBottom;
+  const maxLeft = windowWidth - menuWidth - paddingRight;
+  const minTop = paddingTop;
+  const minLeft = paddingLeft;
 
   const getSides = () => {
     return {
       x: {
         left: pageX,
-        right: pageX - menuWidth
+        right: Math.min(maxLeft, pageX - menuWidth)
       },
-      intermediateX: side === 'right' ? PADDING_LEFT : windowWidth - menuWidth - PADDING_LEFT,
+      intermediateX: side === 'right' ? minLeft : maxLeft,
       //intermediateX: clientX < windowWidth / 2 ? PADDING_LEFT : windowWidth - menuWidth - PADDING_LEFT,
       y: {
         top: pageY,
         bottom: pageY - menuHeight
       },
-      //intermediateY: verticalSide === 'top' ? PADDING_TOP : windowHeight - menuHeight - PADDING_TOP,
-      intermediateY: pageY < windowHeight / 2 ? PADDING_TOP : windowHeight - menuHeight - PADDING_TOP,
+      //intermediateY: verticalSide === 'top' ? paddingTop : windowHeight - menuHeight - paddingTop,
+      // intermediateY: pageY < (windowHeight / 2) ? paddingTop : windowHeight - menuHeight - paddingBottom,
+      intermediateY: maxTop,
     };
   };
 
@@ -244,12 +242,12 @@ export function positionMenu({pageX, pageY}: MouseEvent | Touch, elem: HTMLEleme
 
   const possibleSides = {
     x: {
-      left: sides.x.left + menuWidth + PADDING_LEFT <= windowWidth,
-      right: sides.x.right >= PADDING_LEFT
+      left: (sides.x.left + menuWidth + paddingRight) <= windowWidth,
+      right: sides.x.right >= paddingLeft
     },
     y: {
-      top: sides.y.top + menuHeight + PADDING_TOP <= windowHeight,
-      bottom: sides.y.bottom - PADDING_TOP >= PADDING_TOP
+      top: (sides.y.top + menuHeight + paddingBottom) <= windowHeight,
+      bottom: (sides.y.bottom - paddingBottom) >= paddingBottom
     }
   };
 
@@ -305,21 +303,43 @@ export function positionMenu({pageX, pageY}: MouseEvent | Touch, elem: HTMLEleme
     (verticalSide === 'center' ? verticalSide : 'bottom') +
     '-' +
     (side === 'center' ? side : (side === 'left' ? 'right' : 'left')));
+
+  return {
+    width: menuWidth,
+    height: menuHeight
+  };
+}
+
+let _cancelContextMenuOpening = false, _cancelContextMenuOpeningTimeout = 0;
+export function cancelContextMenuOpening() {
+  if(_cancelContextMenuOpeningTimeout) {
+    clearTimeout(_cancelContextMenuOpeningTimeout);
+  }
+    
+  _cancelContextMenuOpeningTimeout = window.setTimeout(() => {
+    _cancelContextMenuOpeningTimeout = 0;
+    _cancelContextMenuOpening = false;
+  }, .4e3);
+
+  _cancelContextMenuOpening = true;
 }
 
 export function attachContextMenuListener(element: HTMLElement, callback: (e: Touch | MouseEvent) => void, listenerSetter?: ListenerSetter) {
-  const add = listenerSetter ? listenerSetter.add.bind(listenerSetter, element) : element.addEventListener.bind(element);
+  const add = listenerSetter ? listenerSetter.add(element) : element.addEventListener.bind(element);
   const remove = listenerSetter ? listenerSetter.removeManual.bind(listenerSetter, element) : element.removeEventListener.bind(element);
 
-  if(isApple && isTouchSupported) {
+  if(IS_APPLE && IS_TOUCH_SUPPORTED) {
     let timeout: number;
 
-    const options: any = /* null */{capture: true};
+    const options: EventListenerOptions = {capture: true};
 
     const onCancel = () => {
       clearTimeout(timeout);
+      // @ts-ignore
       remove('touchmove', onCancel, options);
+      // @ts-ignore
       remove('touchend', onCancel, options);
+      // @ts-ignore
       remove('touchcancel', onCancel, options);
     };
 
@@ -334,6 +354,11 @@ export function attachContextMenuListener(element: HTMLElement, callback: (e: To
       add('touchcancel', onCancel, options);
 
       timeout = window.setTimeout(() => {
+        if(_cancelContextMenuOpening) {
+          onCancel();
+          return;
+        }
+
         callback(e.touches[0]);
         onCancel();
 
@@ -349,7 +374,7 @@ export function attachContextMenuListener(element: HTMLElement, callback: (e: To
       }, {passive: false, capture: true});
     } */
   } else {
-    add('contextmenu', isTouchSupported ? (e: any) => {
+    add('contextmenu', IS_TOUCH_SUPPORTED ? (e: any) => {
       callback(e);
 
       if(openedMenu) {

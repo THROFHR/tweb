@@ -6,20 +6,33 @@
 
 import { PrivacyType } from "../../../../lib/appManagers/appPrivacyManager";
 import { SliderSuperTabEventable } from "../../../sliderTab";
-import PrivacySection from "../../../privacySection";
-import { LangPackKey } from "../../../../lib/langPack";
+import PrivacySection, { PrivacySectionStr } from "../../../privacySection";
+import { i18n, LangPackKey } from "../../../../lib/langPack";
+import anchorCopy from "../../../../helpers/dom/anchorCopy";
 
 export default class AppPrivacyPhoneNumberTab extends SliderSuperTabEventable {
   protected init() {
+    this.header.classList.add('with-border');
     this.container.classList.add('privacy-tab', 'privacy-phone-number');
     this.setTitle('PrivacyPhone');
 
-    const phoneCaption: LangPackKey = 'PrivacyPhoneInfo';
+    const captionEl = document.createElement('div');
+    captionEl.append(
+      i18n('PrivacyPhoneInfo'), 
+      document.createElement('br'), 
+      document.createElement('br'), 
+      i18n('PrivacyPhoneInfo4'),
+      document.createElement('br'),
+      anchorCopy({
+        mePath: '+380509144504'
+      })
+    );
+
     const phoneSection = new PrivacySection({
       tab: this,
       title: 'PrivacyPhoneTitle',
       inputKey: 'inputPrivacyKeyPhoneNumber',
-      captions: [phoneCaption, phoneCaption, ''],
+      captions: [captionEl, captionEl, ''],
       exceptionTexts: ['PrivacySettingsController.NeverShare', 'PrivacySettingsController.AlwaysShare'],
       appendTo: this.scrollable,
       onRadioChange: (type) => {

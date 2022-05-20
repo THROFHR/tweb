@@ -4,6 +4,7 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import setInnerHTML from "../../helpers/dom/setInnerHTML";
 import RichTextProcessor from "../../lib/richtextprocessor";
 import AvatarElement from "../avatar";
 import PeerTitle from "../peerTitle";
@@ -16,7 +17,12 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
   protected static BASE_CLASS_LIST_ELEMENT = AutocompletePeerHelper.BASE_CLASS + '-list-element';
   private scrollable: Scrollable;
 
-  constructor(appendTo: HTMLElement, controller: AutocompleteHelperController, protected className: string, onSelect: (target: Element) => boolean | void) {
+  constructor(
+    appendTo: HTMLElement, 
+    controller: AutocompleteHelperController, 
+    protected className: string, 
+    onSelect: (target: Element) => boolean | void
+  ) {
     super({
       appendTo, 
       controller,
@@ -29,7 +35,7 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
 
   protected init() {
     this.list = document.createElement('div');
-    this.list.classList.add(AutocompletePeerHelper.BASE_CLASS + '-list');
+    this.list.classList.add(AutocompletePeerHelper.BASE_CLASS + '-list', this.className + '-list');
 
     this.container.append(this.list);
 
@@ -42,7 +48,7 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
     });
   }
 
-  public render(data: {peerId: number, name?: string, description?: string}[]) {
+  public render(data: {peerId: PeerId, name?: string, description?: string}[], doNotShow?: boolean) {
     if(this.init) {
       if(!data.length) {
         return;
@@ -66,12 +72,14 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
       });
     }
 
-    this.toggle(!data.length);
+    if(!doNotShow) {
+      this.toggle(!data.length);
+    }
   }
 
   public static listElement(options: {
     className: string,
-    peerId: number,
+    peerId: PeerId,
     name?: string,
     description?: string
   }) {
@@ -83,9 +91,11 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
     div.dataset.peerId = '' + options.peerId;
   
     const avatar = new AvatarElement();
-    avatar.classList.add('avatar-30');
-    avatar.setAttribute('dialog', '0');
-    avatar.setAttribute('peer', '' + options.peerId);
+    avatar.classList.add('avatar-30', BASE + '-avatar', options.className + '-avatar');
+    avatar.updateWithOptions({
+      isDialog: false,
+      peerId: options.peerId
+    });
   
     const name = document.createElement('div');
     name.classList.add(BASE + '-name', options.className + '-name');
@@ -97,7 +107,7 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
         plainText: false
       }).element);
     } else {
-      name.innerHTML = RichTextProcessor.wrapEmojiText(options.name);
+      setInnerHTML(name, RichTextProcessor.wrapEmojiText(options.name));
     }
   
     div.append(avatar, name);
@@ -105,7 +115,7 @@ export default class AutocompletePeerHelper extends AutocompleteHelper {
     if(options.description) {
       const description = document.createElement('div');
       description.classList.add(BASE + '-description', options.className + '-description');
-      description.innerHTML = RichTextProcessor.wrapEmojiText(options.description);
+      setInnerHTML(description, RichTextProcessor.wrapEmojiText(options.description));
       div.append(description);
     }
   

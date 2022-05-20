@@ -4,6 +4,8 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+$inactive-opacity: .4;
+
 .media-viewer {
   position: fixed;
   top: 0;
@@ -21,27 +23,18 @@
   }
 
   &-author {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: 3.75rem;
-    padding: .5rem .5rem .5rem 5rem;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    color: #8b8b8b;
-    transition: var(--open-duration);
+    height: 100%;
     cursor: pointer;
+    display: flex;
+    align-items: center;
 
-    @include hover() {
-      color: #fff;
+    @include respond-to(handhelds) {
+      margin-left: 1.5rem;
     }
   }
 
   &-userpic {
-    position: absolute;
-    top: .5rem;
-    left: 1.25rem;
+    margin-right: 1rem;
 
     @include respond-to(handhelds) {
       display: none;
@@ -49,11 +42,18 @@
   }
 
   &-name {
-    font-weight: 500;
+    line-height: var(--line-height);
+    font-weight: var(--font-weight-bold);
+    margin: .0625rem 0;
+
+    @include respond-to(not-handhelds) {
+      margin: .0625rem 0 .125rem;
+    }
   }
   
   &-date {
-    font-size: 15px;
+    line-height: var(--line-height);
+    font-size: .875rem;
   }
 
   &-buttons {
@@ -62,7 +62,7 @@
     right: 0;
     display: flex;
     flex-flow: row nowrap;
-    padding: .5rem;
+    padding: .5rem .75rem;
 
     .btn-icon {
       margin: 0 .25rem;
@@ -103,6 +103,10 @@
     flex: 1 1 auto;
     display: flex;
     align-items: center;
+
+    /* &.with-caption {
+      padding: 4rem 0;
+    } */
   }
 
   &-media {
@@ -117,39 +121,80 @@
     word-break: break-word;
     overflow: hidden;
     text-overflow: ellipsis;
-    z-index: 5;
-    bottom: 3rem;
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 0 .5rem;
-    background-color: rgba(0, 0, 0, .6);
-    border-radius: 8px;
+    z-index: 4;
+    // bottom: .75rem;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: .5rem .5rem 0;
+    // background-color: rgba(0, 0, 0, .6);
+    // border-radius: 8px;
     opacity: 0;
-    transition: opacity var(--open-duration);
-
-    @include respond-to(handhelds) {
-      border-radius: 0;
-      width: 100%;
+    line-height: var(--line-height);
+    white-space: pre-wrap;
+    background-color: transparent;
+    
+    @include animation-level(2) {
+      transition: transform var(--layer-transition), opacity var(--open-duration) ease-in-out, background-color var(--open-duration) ease-in-out;
     }
 
-    > .scrollable {
-      padding: .5rem 0;
-      max-height: 10rem;
-      max-width: 1280px;
+    a {
+      color: #60a5e9 !important;
+    }
+
+    .scrollable {
+      padding: .5rem .875rem;
+      // max-height: 10rem;
+      max-height: 6rem;
+      max-width: 50rem;
+      height: 6rem;
       position: relative;
+      margin: 0 auto;
     }
 
     .media-viewer-whole.active & {
-      opacity: 1;
-
-      @include hover() { 
-        opacity: .2;
+      html.no-touch & {
+        opacity: $inactive-opacity;
 
         &:hover {
           opacity: 1;
-          //color: #fff;
         }
       }
+
+      html.is-touch & {
+        opacity: .6;
+      }
+    }
+
+    @include respond-to(handhelds) {
+      // border-radius: 0;
+      width: 100%;
+      transform: translateZ(0);
+      text-align: unset;
+      bottom: 1.0625rem;
+
+      .scrollable {
+        padding: 0 .5rem;
+        height: auto;
+      }
+
+      .media-viewer-whole.has-video-controls & {
+        transform: translate3d(0, -69px, 0);
+      }
+
+      .media-viewer-whole.backwards & {
+        visibility: hidden;
+      }
+
+      @include hover() {
+        background-color: #000;
+        opacity: 1 !important;
+      }
+    }
+
+    &.is-focused {
+      background-color: #000;
+      opacity: 1 !important;
     }
   }
 
@@ -162,11 +207,11 @@
     cursor: pointer;
     z-index: 5;
 
-    @include hover() {
+    html.no-touch & {
       height: calc(100% - 3.75rem);
 
       &:hover {
-        > span {
+        .tgico-down {
           opacity: 1;
         }
       }
@@ -213,7 +258,7 @@
 
   &-mover/* , &-canvas */ {
     position: fixed!important;
-    z-index: 4;
+    // z-index: 4;
     //transition: .5s all;
     display: flex;
     justify-content: center;
@@ -226,7 +271,10 @@
     overflow: hidden;
     transform: translateZ(0) scale3d(1, 1, 1);
     border-radius: 0;
-    -webkit-mask-image: -webkit-radial-gradient(circle, white 100%, black 100%); // fix border-radius overflow
+
+    &:not(.center) {
+      -webkit-mask-image: -webkit-radial-gradient(circle, white 100%, black 100%); // fix border-radius overflow
+    }
 
     // эти значения должны быть такими же, как при установке maxWidth и maxHeight в openMedia!
     //max-width: 100%;
@@ -305,13 +353,16 @@
       left: 50% !important;
       top: 50% !important;
       transform: translate3d(-50%, -50%, 0) !important;
-      max-width: calc(100vw - 16px);
-      max-height: calc((var(--vh, 1vh) * 100) - 100px);
+      max-width: 100vw;
+      // max-height: calc((var(--vh, 1vh) * 100) - 120px);
+      max-height: calc((var(--vh, 1vh) * 100) - 15rem);
 
       @include respond-to(handhelds) {
         width: 100% !important;
         height: 100% !important;
         max-width: 100vw !important;
+        max-height: calc((var(--vh, 1vh) * 100) - 120px);
+        // max-height: 100vh !important;
         // TODO: max-height: calc((var(--vh, 1vh) * 100));
         //height: calc(100% - 100px) !important;
         /* height: calc(100% - 50px) !important;
@@ -326,12 +377,9 @@
         } */
 
         .ckin__player:not(.ckin__fullscreen) {
-          .default__controls {
-            bottom: -50px;
-          }
-
-          .default__gradient-bottom {
-            bottom: -50px;
+          .default__controls/* ,
+          .default__gradient-bottom */ {
+            bottom: -62px;
           }
         }
       }
@@ -346,9 +394,10 @@
         }
       } */
 
-      img:not(.thumbnail), video {
-        height: auto;
-        width: auto;
+      img:not(.thumbnail), 
+      video {
+        /* height: auto;
+        width: auto; */
         object-fit: contain;
         //max-height: calc(100% - 100px);
       }
@@ -364,6 +413,56 @@
       img, video {
         opacity: 0;
       }
+    }
+  }
+
+  &-appear {
+    opacity: 0;
+    visibility: hidden;
+
+    @include animation-level(2) {
+      transition: opacity var(--open-duration) 0s, visibility 0s var(--open-duration);
+    }
+  }
+  
+  &-topbar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    z-index: 5;
+    padding: 0 1.25rem;
+
+    .btn-icon, .media-viewer-author {
+      color: #fff;
+      opacity: $inactive-opacity;
+
+      @include animation-level(2) {
+        transition: opacity var(--open-duration) ease-in-out, color var(--open-duration) ease-in-out, background-color var(--open-duration) ease-in-out;
+      }
+
+      @include hover() {
+        opacity: 1;
+      }
+    }
+
+    &-left {
+      display: flex;
+      align-items: center;
+    }
+
+    @include respond-to(handhelds) {
+      padding: 0 .5rem;
+      // transform: translateY(-3.5rem);
+      // background: rgba(0, 0, 0, .2);
+
+      /* @include animation-level(2) {
+        transition: transform var(--open-duration) ease-in-out;
+      } */
     }
   }
 
@@ -408,32 +507,46 @@
       visibility: visible;
       transition-delay: 0s;
 
-      .overlays, > .btn-icon {
+      .overlays,
+      .media-viewer-appear/* , 
+      > .btn-icon */ {
         opacity: 1;
         visibility: visible;
-        transition: opacity var(--open-duration) 0s, visibility 0s 0s;
+
+        @include animation-level(2) {
+          transition: opacity var(--open-duration) 0s, visibility 0s 0s;
+        }
+      }
+
+      .media-viewer-caption {
+        visibility: visible;
+        // transition-delay: 0s, 0s, var(--open-duration), 0s;
       }
     }
 
     @include respond-to(handhelds) {
-      .tgico-close.only-handhelds {
-        left: 20px;
-      }
-
-      > .btn-icon {
+      /* > .btn-icon {
         top: 8px;
         position: fixed;
         z-index: 5;
         opacity: 0;
         transition: opacity var(--open-duration) 0s, visibility 0s var(--open-duration);
-      }
+      } */
   
-      .btn-menu-toggle {
-        right: 8px;
-  
+      .btn-menu-toggle:not(.playback-rate) {
+        color: rgba(255, 255, 255, $inactive-opacity);
+        opacity: 1;
+
         &.menu-open {
           color: #fff;
           background-color: rgba(112, 117, 121, .2) !important;
+        }
+      }
+
+      &.hide-caption {
+        .media-viewer-caption {
+          opacity: 0 !important;
+          pointer-events: none;
         }
       }
     }
@@ -443,14 +556,111 @@
         opacity: 1;
       }
     }
+
+    &.no-forwards {
+      img {
+        pointer-events: none;
+      }
+
+      .media-viewer-caption {
+        user-select: none;
+      }
+    }
   }
 
-  &-switchers {
+  &-movers {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
+
+    @include animation-level(2) {
+      transition: transform var(--open-duration);
+    }
+  }
+
+  /* &-switchers {
     position: relative;
     width: $large-screen;
     max-width: 100%;
     height: 100%;
     margin: 0 auto;
+  } */
+}
+
+.tgico-zoom {
+  &:before {
+    content: $tgico-zoomout;
+  }
+
+  &.zoom-in:before {
+    content: $tgico-zoomin;
+  }
+}
+
+.zoom-container {
+  width: 17.125rem;
+  height: 3.375rem;
+  background-color: rgba(0, 0, 0, .4);
+  border-radius: $border-radius-big;
+  padding: .5rem;
+  opacity: 1;
+  
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  
+  position: absolute;
+  bottom: 1.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+
+  @include animation-level(2) {
+    transition: opacity var(--open-duration);
+  }
+  
+  .btn-icon {
+    color: #fff;
+
+    &.inactive {
+      pointer-events: none;
+      opacity: $inactive-opacity;
+    }
+  }
+
+  .progress-line {
+    --color: #fff;
+    --height: 2px;
+    flex: 1 1 auto;
+    margin: 0 1px;
+
+    &:before {
+      opacity: 1;
+    }
+  }
+
+  &:not(.is-visible),
+  .media-viewer-whole:not(.active) & {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  &.is-visible {
+    opacity: 1;
+
+    & ~ .media-viewer-caption {
+      opacity: 0 !important;
+      pointer-events: none;
+    }
+
+    & ~ .media-viewer-movers {
+      .default__button--big {
+        opacity: 0 !important;
+      }
+    }
   }
 }
 

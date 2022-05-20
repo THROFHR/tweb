@@ -6,7 +6,7 @@
 
 import { SliderSuperTab } from "../../slider";
 import AppSelectPeers from "../../appSelectPeers";
-import { putPreloader } from "../../misc";
+import { setButtonLoader } from "../../misc";
 import { LangPackKey, _i18n } from "../../../lib/langPack";
 import ButtonCorner from "../../buttonCorner";
 
@@ -14,16 +14,17 @@ export default class AppAddMembersTab extends SliderSuperTab {
   private nextBtn: HTMLButtonElement;
   private selector: AppSelectPeers;
   private peerType: 'channel' | 'chat' | 'privacy';
-  private takeOut: (peerIds: number[]) => Promise<any> | false | void;
+  private takeOut: (peerIds: PeerId[]) => Promise<any> | false | void;
   private skippable: boolean;
 
   protected init() {
+    this.container.classList.add('add-members-container');
     this.nextBtn = ButtonCorner({icon: 'arrow_next'});
     this.content.append(this.nextBtn);
     this.scrollable.container.remove();
     
     this.nextBtn.addEventListener('click', () => {
-      const peerIds = this.selector.getSelected();
+      const peerIds = this.selector.getSelected().map(sel => sel.toPeerId());
 
       if(this.skippable) {
         this.takeOut(peerIds);
@@ -41,24 +42,22 @@ export default class AppAddMembersTab extends SliderSuperTab {
   }
 
   public attachToPromise(promise: Promise<any>) {
-    this.nextBtn.classList.remove('tgico-arrow_next');
-    this.nextBtn.disabled = true;
-    putPreloader(this.nextBtn);
-    this.selector.freezed = true;
+    const removeLoader = setButtonLoader(this.nextBtn, 'arrow_next');
 
     promise.then(() => {
       this.close();
+    }, () => {
+      removeLoader();
     });
   }
 
   public open(options: {
     title: LangPackKey,
     placeholder: LangPackKey,
-    peerId?: number, 
     type: AppAddMembersTab['peerType'], 
     takeOut?: AppAddMembersTab['takeOut'],
     skippable: boolean,
-    selectedPeerIds?: number[]
+    selectedPeerIds?: PeerId[]
   }) {
     const ret = super.open();
 
@@ -67,13 +66,16 @@ export default class AppAddMembersTab extends SliderSuperTab {
     this.takeOut = options.takeOut;
     this.skippable = options.skippable;
 
+    const isPrivacy = this.peerType === 'privacy';
     this.selector = new AppSelectPeers({
       appendTo: this.content, 
       onChange: this.skippable ? null : (length) => {
         this.nextBtn.classList.toggle('is-visible', !!length);
       }, 
-      peerType: ['contacts'],
-      placeholder: options.placeholder
+      peerType: [isPrivacy ? 'dialogs' : 'contacts'],
+      placeholder: options.placeholder,
+      exceptSelf: isPrivacy,
+      filterPeerTypeBy: isPrivacy ? ['isAnyGroup', 'isUser'] : undefined
     });
 
     if(options.selectedPeerIds) {

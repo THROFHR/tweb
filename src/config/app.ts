@@ -9,15 +9,28 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
+import type { DcId } from "../types";
+
+export const MAIN_DOMAIN = 'web.telegram.org';
+
 const App = {
-  id: 1025907,
-  hash: '452b0359b988148995f22ff0f4229750',
-  version: '0.5.5',
-  langPackVersion: '0.1.9',
+  id: +process.env.API_ID,
+  hash: process.env.API_HASH,
+  version: process.env.VERSION,
+  versionFull: process.env.VERSION_FULL,
+  build: +process.env.BUILD,
+  langPackVersion: '0.4.0',
   langPack: 'macos',
   langPackCode: 'en',
-  domains: [] as string[],
-  baseDcId: 2
+  domains: [MAIN_DOMAIN] as string[],
+  baseDcId: 2 as DcId,
+  isMainDomain: location.hostname === MAIN_DOMAIN,
+  suffix: 'K'
 };
+
+if(App.isMainDomain) { // use Webogram credentials then
+  App.id = 2496;
+  App.hash = '8da85b0d5bfe62527e5b244c209159c3';
+}
 
 export default App;

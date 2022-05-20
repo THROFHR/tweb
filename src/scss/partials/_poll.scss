@@ -8,12 +8,13 @@ poll-element {
   margin-top: -1px;
   display: block;
   //min-width: 280px;
-  min-width: 330px;
+  width: 330px;
   user-select: none;
   color: var(--primary-text-color);
   
   @include respond-to(handhelds) {
-    min-width: 240px;
+    width: 240px;
+    max-width: 100%;
   }
 
   &:not(.is-closed):not(.is-voted) .poll-answer {
@@ -22,7 +23,7 @@ poll-element {
 
   .poll {
     &-title {
-      font-weight: 500;
+      font-weight: var(--font-weight-bold);
   
       @include respond-to(handhelds) {
         max-width: 88%;
@@ -36,6 +37,7 @@ poll-element {
       margin-top: 2px;
       margin-bottom: 5px;
       display: flex;
+      align-items: center;
       position: relative;
 
       // @include respond-to(handhelds) {
@@ -79,6 +81,13 @@ poll-element {
       margin-left: 18px;
     }
 
+    &-avatar {
+      border: 1px solid var(--border-color);
+      cursor: pointer;
+      width: 18px;
+      height: 18px;
+    }
+
     &-answer {
       display: flex;
       position: relative;
@@ -96,7 +105,7 @@ poll-element {
         left: 0;
         top: 0;
         opacity: 0;
-        font-weight: 500;
+        font-weight: var(--font-weight-bold);
         margin-top: 7px;
         font-size: 14px;
         margin-left: -9px;
@@ -113,7 +122,7 @@ poll-element {
         border-radius: 50%;
         height: 16px;
         width: 16px;
-        font-weight: bold;
+        font-weight: var(--font-weight-bold);
         font-size: .75rem;
         opacity: 1;
         display: flex;
@@ -123,7 +132,7 @@ poll-element {
         &:before {
           content: $tgico-check;
           //margin-left: 1px;
-          font-weight: bold;
+          font-weight: var(--font-weight-bold);
         }
       }
 
@@ -165,8 +174,9 @@ poll-element {
 
     &-votes-count {
       color: var(--secondary-text-color);
-      font-size: 14px;
-      padding-top: 1px;
+      font-size: .875rem;
+      // padding-top: .1875rem; // THIS IS MOCKUP!
+      margin-top: -.5rem; // this is human-readable
     }
 
     &-line {
@@ -187,27 +197,29 @@ poll-element {
 
     &-footer {
       text-align: center;
-      margin-top: 7px;
-      height: 27px;
+      margin: -.375rem -.5rem -.375rem -.625rem;
+      height: 2.875rem;
     }
 
     &-footer-button {
       cursor: pointer;
-      position: absolute;
-      left: 0;
-      margin-top: -7px;
       width: 100%;
-      height: 41px;
+      height: 100%;
       color: var(--primary-color);
       //text-transform: uppercase;
-      font-weight: 500;
+      font-weight: var(--font-weight-bold);
       border-top-left-radius: 0 !important;
       border-top-right-radius: 0 !important;
       //border-bottom-left-radius: 6px;
       //border-bottom-right-radius: 12px;
       font-size: 1rem;
-      line-height: 37px;
       overflow: hidden;
+    }
+
+    &-footer, &-footer-button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     &-quiz-timer {
@@ -224,7 +236,7 @@ poll-element {
 
     &-time {
       font-size: 12px;
-      font-weight: 500;
+      font-weight: var(--font-weight-bold);
       position: absolute;
       right: 27px;
       color: #a3adb6;
@@ -258,13 +270,6 @@ poll-element {
     } */
   }
 
-  avatar-element {
-    border: 1px solid var(--border-color);
-    cursor: pointer;
-    width: 18px;
-    height: 18px;
-  }
-
   .circle-hover {
     display: flex;
     justify-content: center;
@@ -287,7 +292,10 @@ poll-element {
       font-size: 20px;
       line-height: 16px;
       animation: none;
-      transition: opacity .2s ease;
+
+      @include animation-level(2) {
+        transition: opacity .2s ease;
+      }
     }
   }
 
@@ -370,6 +378,22 @@ poll-element {
     .circle-hover {
       transition: .1s transform;
     }
+  }
+
+  // * correct styles, 26.08.2021
+  &.is-multiple {
+    .poll-desc {
+      margin-bottom: .5rem;
+    }
+
+    // ! conflicts with 100% result
+    /* .poll-answer {
+      margin-left: -.375rem;
+    } */
+  }
+
+  .c-ripple__circle {
+    background-color: var(--light-primary-color);
   }
 }
 

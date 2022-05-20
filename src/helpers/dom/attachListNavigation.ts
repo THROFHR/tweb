@@ -5,7 +5,7 @@
  */
 
 import fastSmoothScroll from "../fastSmoothScroll";
-import { cancelEvent } from "./cancelEvent";
+import cancelEvent from "./cancelEvent";
 import { attachClickEvent, detachClickEvent } from "./clickEvent";
 import findUpAsChild from "./findUpAsChild";
 import findUpClassName from "./findUpClassName";
@@ -14,14 +14,18 @@ type ArrowKey = 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' | 'ArrowRight';
 const HANDLE_EVENT = 'keydown';
 const ACTIVE_CLASS_NAME = 'active';
 
+const AXIS_Y_KEYS: ArrowKey[] = ['ArrowUp', 'ArrowDown'];
+const AXIS_X_KEYS: ArrowKey[] = ['ArrowLeft', 'ArrowRight'];
+
 export default function attachListNavigation({list, type, onSelect, once, waitForKey}: {
   list: HTMLElement, 
   type: 'xy' | 'x' | 'y',
   onSelect: (target: Element) => void | boolean,
   once: boolean,
-  waitForKey?: string
+  waitForKey?: string[]
 }) {
-  const keyNames: Set<ArrowKey> = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+  let waitForKeySet = waitForKey?.length ? new Set(waitForKey) : undefined;
+  const keyNames = new Set(type === 'xy' ? AXIS_Y_KEYS.concat(AXIS_X_KEYS) : (type === 'x' ? AXIS_X_KEYS : AXIS_Y_KEYS)); 
 
   let target: Element;
   const getCurrentTarget = () => {
@@ -40,10 +44,17 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
     }
 
     target = _target;
+    if(!target) return;
     target.classList.add(ACTIVE_CLASS_NAME);
 
     if(hadTarget && scrollable && scrollTo) {
-      fastSmoothScroll(scrollable, target as HTMLElement, 'center', undefined, undefined, undefined, 100, type === 'x' ? 'x' : 'y');
+      fastSmoothScroll({
+        container: scrollable, 
+        element: target as HTMLElement, 
+        position: 'center', 
+        forceDuration: 100, 
+        axis: type === 'x' ? 'x' : 'y'
+      });
     }
   };
 
@@ -84,8 +95,9 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
   }
 
   let onKeyDown = (e: KeyboardEvent) => {
-    if(!keyNames.has(e.key as any)) {
-      if(e.key === 'Enter') {
+    const key = e.key;
+    if(!keyNames.has(key as any)) {
+      if(key === 'Enter' || (type !== 'xy' && key === 'Tab')) {
         cancelEvent(e);
         fireSelect(getCurrentTarget());
       }
@@ -97,7 +109,7 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
 
     if(list.childElementCount > 1) {
       let currentTarget = getCurrentTarget();
-      currentTarget = handleArrowKey(currentTarget, e.key as any);
+      currentTarget = handleArrowKey(currentTarget, key as any);
       setCurrentTarget(currentTarget, true);
     }
   };
@@ -133,7 +145,20 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
     }
   };
 
+  let attached = false;
+  const attach = () => {
+    if(attached) return;
+    attached = true;
+    // const input = document.activeElement as HTMLElement;
+    // input.addEventListener(HANDLE_EVENT, onKeyDown, {capture: true, passive: false});
+    document.addEventListener(HANDLE_EVENT, onKeyDown, {capture: true, passive: false});
+    list.addEventListener('mousemove', onMouseMove, {passive: true});
+    attachClickEvent(list, onClick);
+  };
+
   const detach = () => {
+    if(!attached) return;
+    attached = false;
     // input.removeEventListener(HANDLE_EVENT, onKeyDown, {capture: true});
     document.removeEventListener(HANDLE_EVENT, onKeyDown, {capture: true});
     list.removeEventListener('mousemove', onMouseMove);
@@ -141,21 +166,21 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
   };
 
   const resetTarget = () => {
-    if(waitForKey) return;
+    if(waitForKeySet) return;
     setCurrentTarget(list.firstElementChild, false);
   };
 
-  if(waitForKey) {
+  if(waitForKeySet) {
     const _onKeyDown = onKeyDown;
     onKeyDown = (e) => {
-      if(e.key === waitForKey) {
+      if(waitForKeySet.has(e.key)) {
         cancelEvent(e);
 
         document.removeEventListener(HANDLE_EVENT, onKeyDown, {capture: true});
         onKeyDown = _onKeyDown;
         document.addEventListener(HANDLE_EVENT, onKeyDown, {capture: true, passive: false});
 
-        waitForKey = undefined;
+        waitForKeySet = undefined;
         resetTarget();
       }
     };
@@ -163,13 +188,10 @@ export default function attachListNavigation({list, type, onSelect, once, waitFo
     resetTarget();
   }
 
-  // const input = document.activeElement as HTMLElement;
-  // input.addEventListener(HANDLE_EVENT, onKeyDown, {capture: true, passive: false});
-  document.addEventListener(HANDLE_EVENT, onKeyDown, {capture: true, passive: false});
-  list.addEventListener('mousemove', onMouseMove, {passive: true});
-  attachClickEvent(list, onClick);
+  attach();
 
   return {
+    attach,
     detach,
     resetTarget
   };

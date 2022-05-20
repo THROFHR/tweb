@@ -7,30 +7,28 @@
 import appChatsManager from "../../lib/appManagers/appChatsManager";
 import appMessagesManager from "../../lib/appManagers/appMessagesManager";
 import rootScope from "../../lib/rootScope";
-import { addCancelButton, PopupButton } from ".";
-import PopupPeer from "./peer";
+import { addCancelButton } from ".";
+import PopupPeer, { PopupPeerButtonCallbackCheckboxes, PopupPeerOptions } from "./peer";
 import { ChatType } from "../chat/chat";
 import { i18n, LangPackKey } from "../../lib/langPack";
 import PeerTitle from "../peerTitle";
+import appPeersManager from "../../lib/appManagers/appPeersManager";
 
 export default class PopupDeleteMessages {
-  constructor(peerId: number, mids: number[], type: ChatType, onConfirm?: () => void) {
-    const peerTitleElement = new PeerTitle({
-      peerId,
-      onlyFirstName: true
-    }).element;
+  constructor(peerId: PeerId, mids: number[], type: ChatType, onConfirm?: () => void) {
+    const peerTitleElement = new PeerTitle({peerId}).element;
 
     mids = mids.slice();
-    const callback = (revoke?: true) => {
+    const callback = (checked: PopupPeerButtonCallbackCheckboxes, revoke?: boolean) => {
       onConfirm && onConfirm();
       if(type === 'scheduled') {
         appMessagesManager.deleteScheduledMessages(peerId, mids);
       } else {
-        appMessagesManager.deleteMessages(peerId, mids, revoke);
+        appMessagesManager.deleteMessages(peerId, mids, !!checked.size || revoke);
       }
     };
 
-    let title: LangPackKey, titleArgs: any[], description: LangPackKey, descriptionArgs: any[], buttons: PopupButton[];
+    let title: LangPackKey, titleArgs: any[], description: LangPackKey, descriptionArgs: any[], buttons: PopupPeerOptions['buttons'], checkboxes: PopupPeerOptions['checkboxes'] = [];
     if(mids.length === 1) {
       title = 'DeleteSingleMessagesTitle';
     } else {
@@ -38,28 +36,30 @@ export default class PopupDeleteMessages {
       titleArgs = [i18n('messages', [mids.length])];
     }
     
-    description = mids.length === 1 ? 'AreYouSureDeleteSingleMessage' : 'AreYouSureDeleteFewMessages';
+    if(appPeersManager.isMegagroup(peerId)) {
+      description = mids.length === 1 ? 'AreYouSureDeleteSingleMessageMega' : 'AreYouSureDeleteFewMessagesMega';
+    } else {
+      description = mids.length === 1 ? 'AreYouSureDeleteSingleMessage' : 'AreYouSureDeleteFewMessages';
+    }
 
     buttons = [{
       langKey: 'Delete',
       isDanger: true,
-      callback: () => callback()
+      callback
     }];
 
     if(peerId === rootScope.myId || type === 'scheduled') {
       
     } else {
-      if(peerId > 0) {
-        buttons.push({
-          langKey: 'DeleteMessagesOptionAlso',
-          langArgs: [peerTitleElement],
-          isDanger: true,
-          callback: () => callback(true)
+      if(peerId.isUser()) {
+        checkboxes.push({
+          text: 'DeleteMessagesOptionAlso',
+          textArgs: [peerTitleElement]
         });
       } else {
-        const chat = appChatsManager.getChat(-peerId);
+        const chat = appChatsManager.getChat(peerId.toChatId());
 
-        const hasRights = appChatsManager.hasRights(-peerId, 'delete_messages');
+        const hasRights = appChatsManager.hasRights(peerId.toChatId(), 'delete_messages');
         if(chat._ === 'chat') {
           const canRevoke = hasRights ? mids.slice() : mids.filter(mid => {
             const message = appMessagesManager.getMessageByPeer(peerId, mid);
@@ -68,16 +68,12 @@ export default class PopupDeleteMessages {
 
           if(canRevoke.length) {
             if(canRevoke.length === mids.length) {
-              buttons.push({
-                langKey: 'DeleteForAll',
-                isDanger: true,
-                callback: () => callback(true)
+              checkboxes.push({
+                text: 'DeleteForAll'
               });
             } else {
-              buttons.push({
-                langKey: 'DeleteMessagesOption',
-                isDanger: true,
-                callback: () => callback(true)
+              checkboxes.push({
+                text: 'DeleteMessagesOption'
               });
 
               description = 'DeleteMessagesTextGroup';
@@ -86,7 +82,7 @@ export default class PopupDeleteMessages {
             }
           }
         } else {
-          buttons[0].callback = () => callback(true);
+          buttons[0].callback = (checked) => callback(checked, true);
         }
       }
     }
@@ -99,7 +95,8 @@ export default class PopupDeleteMessages {
       titleLangArgs: titleArgs,
       descriptionLangKey: description,
       descriptionLangArgs: descriptionArgs,
-      buttons
+      buttons,
+      checkboxes
     });
 
     popup.show();

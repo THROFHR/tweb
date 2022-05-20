@@ -11,19 +11,26 @@
 
 import { fontFamily } from "../../components/middleEllipsis";
 import { MOUNT_CLASS_TO } from "../../config/debug";
-import { CancellablePromise, deferredPromise } from "../../helpers/cancellablePromise";
+import deferredPromise, { CancellablePromise } from "../../helpers/cancellablePromise";
 import { tsNow } from "../../helpers/date";
-import { deepEqual } from "../../helpers/object";
-import { convertInputKeyToKey } from "../../helpers/string";
-import { isMobile } from "../../helpers/userAgent";
+import { IS_MOBILE } from "../../environment/userAgent";
 import { InputNotifyPeer, InputPeerNotifySettings, NotifyPeer, PeerNotifySettings, Update } from "../../layer";
 import I18n from "../langPack";
 import apiManager from "../mtproto/mtprotoworker";
+import webPushApiManager, { PushSubscriptionNotify } from "../mtproto/webPushApiManager";
 import rootScope from "../rootScope";
-import sessionStorage from "../sessionStorage";
+import stateStorage from "../stateStorage";
 import apiUpdatesManager from "./apiUpdatesManager";
+import appChatsManager from "./appChatsManager";
 import appPeersManager from "./appPeersManager";
+import appRuntimeManager from "./appRuntimeManager";
 import appStateManager from "./appStateManager";
+import appUsersManager from "./appUsersManager";
+import IS_VIBRATE_SUPPORTED from "../../environment/vibrateSupport";
+import { MUTE_UNTIL } from "../mtproto/mtproto_config";
+import throttle from "../../helpers/schedulers/throttle";
+import deepEqual from "../../helpers/object/deepEqual";
+import convertInputKeyToKey from "../../helpers/string/convertInputKeyToKey";
 
 type MyNotification = Notification & {
   hidden?: boolean,
@@ -38,20 +45,30 @@ export type NotifyOptions = Partial<{
   message: string;
   silent: boolean;
   onclick: () => void;
+  noIncrement: boolean;
 }>;
+
+export type NotificationSettings = {
+  nodesktop: boolean,
+  volume: number,
+  novibrate: boolean,
+  nopreview: boolean,
+  nopush: boolean,
+  nosound: boolean
+};
 
 type ImSadAboutIt = Promise<PeerNotifySettings> | PeerNotifySettings;
 export class AppNotificationsManager {
   private notificationsUiSupport: boolean;
-  private notificationsShown: {[key: string]: MyNotification} = {};
+  private notificationsShown: {[key: string]: MyNotification | true} = {};
   private notificationIndex = 0;
   private notificationsCount = 0;
   private soundsPlayed: {[tag: string]: number} = {};
-  private vibrateSupport = !!navigator.vibrate;
+  private vibrateSupport = IS_VIBRATE_SUPPORTED;
   private nextSoundAt: number;
   private prevSoundVolume: number;
   private peerSettings = {
-    notifyPeer: {} as {[peerId: number]: ImSadAboutIt},
+    notifyPeer: {} as {[peerId: PeerId]: ImSadAboutIt},
     notifyUsers: null as ImSadAboutIt,
     notifyChats: null as ImSadAboutIt,
     notifyBroadcasts: null as ImSadAboutIt
@@ -66,14 +83,7 @@ export class AppNotificationsManager {
   private prevFavicon: string;
   private stopped = false;
 
-  private settings: Partial<{
-    nodesktop: boolean,
-    volume: number,
-    novibrate: boolean,
-    nopreview: boolean,
-    nopush: boolean,
-    nosound: boolean,
-  }> = {};
+  private settings: NotificationSettings = {} as any;
 
   private registeredDevice: any;
   private pushInited = false;
@@ -83,6 +93,9 @@ export class AppNotificationsManager {
   private notifySoundEl: HTMLElement;
 
   private getNotifyPeerTypePromise: Promise<any>;
+
+  private checkMuteUntilTimeout: number;
+  private checkMuteUntilThrottled: () => void;
 
   constructor() {
     // @ts-ignore
@@ -96,13 +109,19 @@ export class AppNotificationsManager {
     this.notifySoundEl.id = 'notify-sound';
     document.body.append(this.notifySoundEl);
 
-    /* rootScope.on('idle.deactivated', (newVal) => {
-      if(newVal) {
-        stop();
-      }
-    });*/
+    this.checkMuteUntilThrottled = throttle(this.checkMuteUntil, 1000, false);
 
-    rootScope.on('idle', (newVal) => {
+    rootScope.addEventListener('instance_deactivated', () => {
+      this.stop();
+    });
+
+    rootScope.addEventListener('instance_activated', () => {
+      if(this.stopped) {
+        this.start();
+      }
+    });
+
+    rootScope.addEventListener('idle', (newVal) => {
       if(this.stopped) {
         return;
       }
@@ -116,45 +135,51 @@ export class AppNotificationsManager {
 
     rootScope.addMultipleEventsListeners({
       updateNotifySettings: (update) => {
-        this.savePeerSettings(update.peer._ === 'notifyPeer' ? appPeersManager.getPeerId(update.peer.peer) : update.peer._, update.notify_settings);
-        rootScope.broadcast('notify_settings', update);
+        const peerId = update.peer._ === 'notifyPeer' && appPeersManager.getPeerId(update.peer.peer);
+        const key = update.peer._ !== 'notifyPeer' ? update.peer._ : undefined;
+        this.savePeerSettings({
+          key,
+          peerId, 
+          settings: update.notify_settings
+        });
+        rootScope.dispatchEvent('notify_settings', update);
       }
     });
 
-    /* rootScope.on('push_init', (tokenData) => {
-      this.pushInited = true
+    rootScope.addEventListener('push_init', (tokenData) => {
+      this.pushInited = true;
       if(!this.settings.nodesktop && !this.settings.nopush) {
         if(tokenData) {
           this.registerDevice(tokenData);
         } else {
-          WebPushApiManager.subscribe();
+          webPushApiManager.subscribe();
         }
       } else {
         this.unregisterDevice(tokenData);
       }
     });
-    rootScope.on('push_subscribe', (tokenData) => {
+    rootScope.addEventListener('push_subscribe', (tokenData) => {
       this.registerDevice(tokenData);
     });
-    rootScope.on('push_unsubscribe', (tokenData) => {
+    rootScope.addEventListener('push_unsubscribe', (tokenData) => {
       this.unregisterDevice(tokenData);
-    }); */
+    });
 
     rootScope.addEventListener('dialogs_multiupdate', () => {
       //unregisterTopMsgs()
       this.topMessagesDeferred.resolve();
-    }, true);
+    }, {once: true});
 
-    /* rootScope.on('push_notification_click', (notificationData) => {
+    rootScope.addEventListener('push_notification_click', (notificationData) => {
       if(notificationData.action === 'push_settings') {
-        this.topMessagesDeferred.then(() => {
+        /* this.topMessagesDeferred.then(() => {
           $modal.open({
             templateUrl: templateUrl('settings_modal'),
             controller: 'SettingsModalController',
             windowClass: 'settings_modal_window mobile_modal',
             backdrop: 'single'
           })
-        });
+        }); */
         return;
       }
 
@@ -176,7 +201,7 @@ export class AppNotificationsManager {
         return;
       }
 
-      const peerId = notificationData.custom && notificationData.custom.peerId;
+      const peerId = notificationData.custom && notificationData.custom.peerId.toPeerId();
       console.log('click', notificationData, peerId);
       if(peerId) {
         this.topMessagesDeferred.then(() => {
@@ -185,20 +210,21 @@ export class AppNotificationsManager {
             return;
           }
 
-          if(peerId > 0 && !appUsersManager.hasUser(peerId)) {
+          if(peerId.isUser() && !appUsersManager.hasUser(peerId)) {
             return;
           }
 
-          // rootScope.broadcast('history_focus', {
-          //   peerString: appPeersManager.getPeerString(peerId)
-          // });
+          rootScope.dispatchEvent('history_focus', {
+            peerId,
+            mid: +notificationData.custom.msg_id
+          });
         });
       }
-    }); */
+    });
   }
 
   private toggleToggler(enable = rootScope.idle.isIDLE) {
-    if(isMobile) return;
+    if(IS_MOBILE) return;
 
     const resetTitle = () => {
       this.titleChanged = false;
@@ -213,13 +239,14 @@ export class AppNotificationsManager {
       resetTitle();
     } else {
       this.titleInterval = window.setInterval(() => {
-        if(!this.notificationsCount) {
+        const count = this.notificationsCount;
+        if(!count) {
           this.toggleToggler(false);
         } else if(this.titleChanged) {
           resetTitle();
         } else {
           this.titleChanged = true;
-          document.title = I18n.format('Notifications.Count', true, [this.notificationsCount]);
+          document.title = I18n.format('Notifications.Count', true, [count]);
           //this.setFavicon('assets/img/favicon_unread.ico');
 
           // fetch('assets/img/favicon.ico')
@@ -239,10 +266,10 @@ export class AppNotificationsManager {
             ctx.fill();
 
             let fontSize = 24;
-            let str = '' + this.notificationsCount;
-            if(this.notificationsCount < 10) {
+            let str = '' + count;
+            if(count < 10) {
               fontSize = 22;
-            } else if(this.notificationsCount < 100) {
+            } else if(count < 100) {
               fontSize = 20;
             } else {
               str = '99+';
@@ -268,7 +295,7 @@ export class AppNotificationsManager {
   }
 
   public updateLocalSettings = () => {
-    Promise.all(['notify_nodesktop', 'notify_volume', 'notify_novibrate', 'notify_nopreview', 'notify_nopush'].map(k => sessionStorage.get(k as any)))
+    Promise.all(['notify_nodesktop', 'notify_volume', 'notify_novibrate', 'notify_nopreview', 'notify_nopush'].map(k => stateStorage.get(k as any)))
     .then((updSettings) => {
       this.settings.nodesktop = updSettings[0];
       this.settings.volume = updSettings[1] === undefined ? 0.5 : updSettings[1];
@@ -276,19 +303,19 @@ export class AppNotificationsManager {
       this.settings.nopreview = updSettings[3];
       this.settings.nopush = updSettings[4];
 
-      /* if(this.pushInited) {
-        const needPush = !this.settings.nopush && !this.settings.nodesktop && WebPushApiManager.isAvailable || false;
+      if(this.pushInited) {
+        const needPush = !this.settings.nopush && !this.settings.nodesktop && webPushApiManager.isAvailable || false;
         const hasPush = this.registeredDevice !== false;
         if(needPush !== hasPush) {
           if(needPush) {
-            WebPushApiManager.subscribe();
+            webPushApiManager.subscribe();
           } else {
-            WebPushApiManager.unsubscribe();
+            webPushApiManager.unsubscribe();
           }
         }
       }
 
-      WebPushApiManager.setSettings(this.settings); */
+      webPushApiManager.setSettings(this.settings);
     });
 
     appStateManager.getState().then(state => {
@@ -304,8 +331,9 @@ export class AppNotificationsManager {
     let key: any = convertInputKeyToKey(peer._);
     let obj: any = this.peerSettings[key as NotifyPeer['_']];
 
+    let peerId: PeerId;
     if(peer._ === 'inputNotifyPeer') {
-      key = appPeersManager.getPeerId(peer.peer);
+      peerId = key = appPeersManager.getPeerId(peer.peer);
       obj = obj[key];
     }
 
@@ -315,7 +343,12 @@ export class AppNotificationsManager {
 
     return (obj || this.peerSettings)[key] = apiManager.invokeApi('account.getNotifySettings', {peer})
     .then(settings => {
-      this.savePeerSettings(key, settings);
+      this.savePeerSettings({
+        key,
+        peerId, 
+        settings
+      });
+      
       return settings;
     });
   }
@@ -342,19 +375,16 @@ export class AppNotificationsManager {
       settings
     }).then(value => {
       if(value) {
-        apiUpdatesManager.processUpdateMessage({
-          _: 'updateShort',
-          update: {
-            _: 'updateNotifySettings', 
-            peer: {
-              ...peer,
-              _: convertInputKeyToKey(peer._)
-            }, 
-            notify_settings: { // ! WOW, IT WORKS !
-              ...settings,
-              _: 'peerNotifySettings',
-            }
-          } as Update.updateNotifySettings
+        apiUpdatesManager.processLocalUpdate({
+          _: 'updateNotifySettings', 
+          peer: {
+            ...peer as any,
+            _: convertInputKeyToKey(peer._)
+          }, 
+          notify_settings: { // ! WOW, IT WORKS !
+            ...settings,
+            _: 'peerNotifySettings',
+          }
         });
       }
     });
@@ -392,16 +422,68 @@ export class AppNotificationsManager {
     this.prevFavicon = href;
   }
 
-  public savePeerSettings(key: number | Exclude<NotifyPeer['_'], 'notifyPeer'>, settings: PeerNotifySettings) {
+  private checkMuteUntil = () => {
+    if(this.checkMuteUntilTimeout !== undefined) {
+      clearTimeout(this.checkMuteUntilTimeout);
+      this.checkMuteUntilTimeout = undefined;
+    }
+
+    const timestamp = tsNow(true);
+    let closestMuteUntil = MUTE_UNTIL;
+    for(const peerId in this.peerSettings.notifyPeer) {
+      const peerNotifySettings = this.peerSettings.notifyPeer[peerId];
+      if(peerNotifySettings instanceof Promise) {
+        continue;
+      }
+
+      const muteUntil = peerNotifySettings.mute_until;
+      if(!muteUntil) {
+        continue;
+      }
+
+      if(muteUntil <= timestamp) {
+        // ! do not delete it because peer's unique settings will be overwritten in getPeerLocalSettings with type's settings
+        peerNotifySettings.mute_until = 0;
+
+        rootScope.dispatchEvent('updateNotifySettings', {
+          _: 'updateNotifySettings',
+          peer: {
+            _: 'notifyPeer',
+            peer: appPeersManager.getOutputPeer(peerId.toPeerId())
+          },
+          notify_settings: peerNotifySettings
+        });
+      } else if(muteUntil < closestMuteUntil) {
+        closestMuteUntil = muteUntil;
+      }
+    }
+
+    const timeout = Math.min(1800e3, (closestMuteUntil - timestamp) * 1000);
+    this.checkMuteUntilTimeout = window.setTimeout(this.checkMuteUntil, timeout);
+  };
+
+  public savePeerSettings({key, peerId, settings}: {
+    key?: Exclude<NotifyPeer['_'], 'notifyPeer'>,
+    peerId?: PeerId, 
+    settings: PeerNotifySettings
+  }) {
     let obj: any;
-    if(typeof(key) === 'number') {
+    if(peerId) {
+      key = peerId as any;
       obj = this.peerSettings['notifyPeer'];
     }
     
     (obj || this.peerSettings)[key] = settings;
 
-    if(typeof(key) !== 'number') {
-      rootScope.broadcast('notify_peer_type_settings', {key, settings});
+    if(!peerId) {
+      rootScope.dispatchEvent('notify_peer_type_settings', {key, settings});
+      appStateManager.getState().then(state => {
+        const notifySettings = state.notifySettings;
+        notifySettings[key] = settings;
+        appStateManager.pushToState('notifySettings', notifySettings);
+      });
+    } else {
+      this.checkMuteUntilThrottled();
     }
 
     //rootScope.broadcast('notify_settings', {peerId: peerId});
@@ -409,16 +491,16 @@ export class AppNotificationsManager {
 
   public isMuted(peerNotifySettings: PeerNotifySettings) {
     return peerNotifySettings._ === 'peerNotifySettings' &&
-      ((peerNotifySettings.mute_until * 1000) > tsNow() || peerNotifySettings.silent);
+      (peerNotifySettings.silent || (peerNotifySettings.mute_until !== undefined && (peerNotifySettings.mute_until * 1000) > tsNow()));
   }
 
-  public getPeerMuted(peerId: number) {
+  public getPeerMuted(peerId: PeerId) {
     const ret = this.getNotifySettings({_: 'inputNotifyPeer', peer: appPeersManager.getInputPeerById(peerId)});
     return (ret instanceof Promise ? ret : Promise.resolve(ret))
     .then((peerNotifySettings) => this.isMuted(peerNotifySettings));
   }
 
-  public getPeerLocalSettings(peerId: number, respectType = true): PeerNotifySettings {
+  public getPeerLocalSettings(peerId: PeerId, respectType = true): PeerNotifySettings {
     const n: PeerNotifySettings = {
       _: 'peerNotifySettings'
     };
@@ -447,7 +529,7 @@ export class AppNotificationsManager {
     return n;
   }
 
-  public isPeerLocalMuted(peerId: number, respectType = true) {
+  public isPeerLocalMuted(peerId: PeerId, respectType = true) {
     if(peerId === rootScope.myId) return false;
 
     const notifySettings = this.getPeerLocalSettings(peerId, respectType);
@@ -456,8 +538,8 @@ export class AppNotificationsManager {
 
   public start() {
     this.updateLocalSettings();
-    rootScope.on('settings_updated', this.updateLocalSettings);
-    //WebPushApiManager.start();
+    rootScope.addEventListener('settings_updated', this.updateLocalSettings);
+    webPushApiManager.start();
 
     if(!this.notificationsUiSupport) {
       return false;
@@ -514,10 +596,17 @@ export class AppNotificationsManager {
     }
     // console.log('notify image', data.image)
 
-    this.notificationsCount++;
+    if(!data.noIncrement) {
+      ++this.notificationsCount;
+    }
+
     if(!this.titleInterval) {
       this.toggleToggler();
     }
+
+    const idx = ++this.notificationIndex;
+    const key = data.key || 'k' + idx;
+    this.notificationsShown[key] = true;
 
     const now = tsNow();
     if(this.settings.volume > 0 && !this.settings.nosound/* &&
@@ -545,8 +634,6 @@ export class AppNotificationsManager {
       return;
     }
 
-    const idx = ++this.notificationIndex;
-    const key = data.key || 'k' + idx;
     let notification: MyNotification;
 
     if('Notification' in window) {
@@ -554,8 +641,7 @@ export class AppNotificationsManager {
         if(data.tag) {
           for(let i in this.notificationsShown) {
             const notification = this.notificationsShown[i];
-            if(notification &&
-                notification.tag === data.tag) {
+            if(typeof(notification) !== 'boolean' && notification.tag === data.tag) {
               notification.hidden = true;
             }
           }
@@ -571,7 +657,7 @@ export class AppNotificationsManager {
         //console.log('notify constructed notification');
       } catch(e) {
         this.notificationsUiSupport = false;
-        //WebPushApiManager.setLocalNotificationsDisabled();
+        webPushApiManager.setLocalNotificationsDisabled();
         return;
       }
     } /* else if('mozNotification' in navigator) {
@@ -589,7 +675,7 @@ export class AppNotificationsManager {
 
     notification.onclick = () => {
       notification.close();
-      //AppRuntimeManager.focus();
+      appRuntimeManager.focus();
       this.clear();
       if(data.onclick) {
         data.onclick();
@@ -608,7 +694,7 @@ export class AppNotificationsManager {
     }
     this.notificationsShown[key] = notification;
 
-    if(!isMobile) {
+    if(!IS_MOBILE) {
       setTimeout(() => {
         this.hide(key);
       }, 8000);
@@ -643,18 +729,18 @@ export class AppNotificationsManager {
     const notification = this.notificationsShown[key];
     if(notification) {
       if(this.notificationsCount > 0) {
-        this.notificationsCount--;
+        --this.notificationsCount;
       }
 
       try {
-        if(notification.close) {
+        if(typeof(notification) !== 'boolean' && notification.close) {
           notification.hidden = true;
           notification.close();
         }/*  else if(notificationsMsSiteMode &&
           notification.index === notificationIndex) {
           window.external.msSiteModeClearIconOverlay()
         } */
-      } catch (e) {}
+      } catch(e) {}
 
       delete this.notificationsShown[key];
     }
@@ -662,13 +748,13 @@ export class AppNotificationsManager {
 
   private hide(key: string) {
     const notification = this.notificationsShown[key];
-    if(notification) {
+    if(notification && typeof(notification) !== 'boolean') {
       try {
         if(notification.close) {
           notification.hidden = true;
           notification.close();
         }
-      } catch (e) {}
+      } catch(e) {}
     }
   }
 
@@ -680,24 +766,23 @@ export class AppNotificationsManager {
     /* if(notificationsMsSiteMode) {
       window.external.msSiteModeClearIconOverlay()
     } else { */
-      for(let i in this.notificationsShown) {
+      for(const i in this.notificationsShown) {
         const notification = this.notificationsShown[i];
         try {
-          if(notification.close) {
+          if(typeof(notification) !== 'boolean' && notification.close) {
             notification.close();
           }
-        } catch (e) {}
+        } catch(e) {}
       }
     /* } */
     this.notificationsShown = {};
     this.notificationsCount = 0;
 
-    //WebPushApiManager.hidePushNotifications();
+    webPushApiManager.hidePushNotifications();
   }
 
-  private registerDevice(tokenData: any) {
-    if(this.registeredDevice &&
-        deepEqual(this.registeredDevice, tokenData)) {
+  private registerDevice(tokenData: PushSubscriptionNotify) {
+    if(this.registeredDevice && deepEqual(this.registeredDevice, tokenData)) {
       return false;
     }
 
@@ -711,10 +796,10 @@ export class AppNotificationsManager {
       this.registeredDevice = tokenData;
     }, (error) => {
       error.handled = true;
-    })
+    });
   }
 
-  private unregisterDevice(tokenData: any) {
+  private unregisterDevice(tokenData: PushSubscriptionNotify) {
     if(!this.registeredDevice) {
       return false;
     }
@@ -724,10 +809,10 @@ export class AppNotificationsManager {
       token: tokenData.tokenValue,
       other_uids: []
     }).then(() => {
-      this.registeredDevice = false
+      this.registeredDevice = false;
     }, (error) => {
-      error.handled = true
-    })
+      error.handled = true;
+    });
   }
 
   public getVibrateSupport() {

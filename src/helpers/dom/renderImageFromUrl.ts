@@ -4,6 +4,8 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+// import { getHeavyAnimationPromise } from "../../hooks/useHeavyAnimationCheck";
+
 export const loadedURLs: {[url: string]: boolean} = {};
 const set = (elem: HTMLElement | HTMLImageElement | SVGImageElement | HTMLVideoElement, url: string) => {
   if(elem instanceof HTMLImageElement || elem instanceof HTMLVideoElement) elem.src = url;
@@ -12,11 +14,16 @@ const set = (elem: HTMLElement | HTMLImageElement | SVGImageElement | HTMLVideoE
 };
 
 // проблема функции в том, что она не подходит для ссылок, пригодна только для blob'ов, потому что обычным ссылкам нужен 'load' каждый раз.
-export default function renderImageFromUrl(elem: HTMLElement | HTMLImageElement | SVGImageElement | HTMLVideoElement, url: string, callback?: (err?: Event) => void, useCache = true): boolean {
+export default function renderImageFromUrl(
+  elem: HTMLElement | HTMLImageElement | SVGImageElement | HTMLVideoElement, 
+  url: string, 
+  callback?: () => void, 
+  useCache = true
+) {
   if(!url) {
     console.error('renderImageFromUrl: no url?', elem, url);
     callback && callback();
-    return false;
+    return;
   }
 
   if(((loadedURLs[url]/*  && false */) && useCache) || elem instanceof HTMLVideoElement) {
@@ -25,7 +32,7 @@ export default function renderImageFromUrl(elem: HTMLElement | HTMLImageElement 
     }
     
     callback && callback();
-    return true;
+    // callback && getHeavyAnimationPromise().then(() => callback());
   } else {
     const isImage = elem instanceof HTMLImageElement;
     const loader = isImage ? elem as HTMLImageElement : new Image();
@@ -39,21 +46,22 @@ export default function renderImageFromUrl(elem: HTMLElement | HTMLImageElement 
 
       loadedURLs[url] = true;
       //console.log('onload:', url, performance.now() - perf);
-      if(callback) {
-        // TODO: переделать прогрузки аватаров до начала анимации, иначе с этим ожиданием они неприятно появляются
-        /* getHeavyAnimationPromise().then(() => {
-          callback();
-        }); */
-        callback();
-      }
-
-      //callback && callback();
-    });
+      // TODO: переделать прогрузки аватаров до начала анимации, иначе с этим ожиданием они неприятно появляются
+      // callback && getHeavyAnimationPromise().then(() => callback());
+      callback && callback();
+    }, {once: true});
 
     if(callback) {
-      loader.addEventListener('error', callback);
+      loader.addEventListener('error', (err) => {
+        console.error('Render image from url failed:', err, url, loader);
+        callback();
+      });
     }
-
-    return false;
   }
+}
+
+export function renderImageFromUrlPromise(elem: Parameters<typeof renderImageFromUrl>[0], url: string, useCache?: boolean) {
+  return new Promise<void>((resolve) => {
+    renderImageFromUrl(elem, url, resolve, useCache);
+  });
 }

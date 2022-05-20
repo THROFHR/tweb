@@ -5,7 +5,8 @@
  */
 
 import { MOUNT_CLASS_TO } from "../config/debug";
-import I18n from "../lib/langPack";
+import I18n, { i18n } from "../lib/langPack";
+import tsNow from './tsNow';
 
 export const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 export const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -19,25 +20,6 @@ export const getWeekNumber = (date: Date) => {
   d.setUTCDate(d.getUTCDate() + 4 - dayNum);
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return Math.ceil((((d.getTime() - yearStart.getTime()) / ONE_DAY) + 1) / 7);
-};
-
-export const formatDateAccordingToToday = (time: Date) => {
-  const date = new Date();
-  const now = date.getTime() / 1000 | 0;
-  const timestamp = time.getTime() / 1000 | 0;
-
-  let timeStr: string;
-  if((now - timestamp) < ONE_DAY && date.getDate() === time.getDate()) { // if the same day
-    timeStr = ('0' + time.getHours()).slice(-2) + ':' + ('0' + time.getMinutes()).slice(-2);
-  } else if(date.getFullYear() !== time.getFullYear()) { // different year
-    timeStr = time.getDate() + '.' + ('0' + (time.getMonth() + 1)).slice(-2) + '.' + ('' + time.getFullYear()).slice(-2);
-  } else if((now - timestamp) < (ONE_DAY * 7) && getWeekNumber(date) === getWeekNumber(time)) { // current week
-    timeStr = days[time.getDay()].slice(0, 3);
-  } else { // same year
-    timeStr = months[time.getMonth()].slice(0, 3) + ' ' + ('0' + time.getDate()).slice(-2);
-  }
-
-  return timeStr;
 };
 
 export function formatDateAccordingToTodayNew(time: Date) {
@@ -64,6 +46,68 @@ export function formatDateAccordingToTodayNew(time: Date) {
   }).element;
 }
 
+export function formatFullSentTimeRaw(timestamp: number, options: {
+  capitalize?: boolean
+} = {}) {
+  const date = new Date();
+  const time = new Date(timestamp * 1000);
+  const now = date.getTime() / 1000;
+
+  const timeEl = formatTime(time);
+
+  let dateEl: Node | string;
+  if((now - timestamp) < ONE_DAY && date.getDate() === time.getDate()) { // if the same day
+    dateEl = i18n(options.capitalize ? 'Date.Today' : 'Peer.Status.Today');
+  } else if((now - timestamp) < (ONE_DAY * 2) && (date.getDate() - 1) === time.getDate()) { // yesterday
+    dateEl = i18n(options.capitalize ? 'Yesterday' : 'Peer.Status.Yesterday');
+
+    if(options.capitalize) {
+      (dateEl as HTMLElement).style.textTransform = 'capitalize';
+    }
+  } else if(date.getFullYear() !== time.getFullYear()) { // different year
+    dateEl = new I18n.IntlDateElement({
+      date: time,
+      options: {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric'
+      }
+    }).element;
+    // dateStr = months[time.getMonth()].slice(0, 3) + ' ' + time.getDate() + ', ' + time.getFullYear();
+  } else {
+    dateEl = new I18n.IntlDateElement({
+      date: time,
+      options: {
+        month: 'short',
+        day: 'numeric'
+      }
+    }).element;
+    // dateStr = months[time.getMonth()].slice(0, 3) + ' ' + time.getDate();
+  }
+
+  return {dateEl, timeEl};
+}
+
+export function formatFullSentTime(timestamp: number) {
+  const {dateEl, timeEl} = formatFullSentTimeRaw(timestamp, {
+    capitalize: true
+  });
+
+  const fragment = document.createDocumentFragment();
+  fragment.append(dateEl, ' ', i18n('ScheduleController.at'), ' ', timeEl);
+  return fragment;
+}
+
+export function formatTime(date: Date) {
+  return new I18n.IntlDateElement({
+    date,
+    options: {
+      hour: '2-digit',
+      minute: '2-digit'
+    }
+  }).element;
+}
+
 MOUNT_CLASS_TO && (MOUNT_CLASS_TO.formatDateAccordingToTodayNew = formatDateAccordingToTodayNew);
 
 export const getFullDate = (date: Date, options: Partial<{
@@ -81,10 +125,7 @@ export const getFullDate = (date: Date, options: Partial<{
     (options.noTime ? '' : ', ' + time);
 };
 
-export function tsNow(seconds?: true) {
-  const t = Date.now();
-  return seconds ? Math.floor(t / 1000) : t;
-}
+export {tsNow};
 
 // https://github.com/DrKLO/Telegram/blob/d52b2c921abd3c1e8d6368858313ad0cb0468c07/TMessagesProj/src/main/java/org/telegram/ui/Adapters/FiltersView.java
 const minYear = 2013;

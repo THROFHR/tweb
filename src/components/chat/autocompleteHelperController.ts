@@ -20,6 +20,12 @@ export default class AutocompleteHelperController {
     return this.tempId;
   } */
 
+  public toggleListNavigation(enabled: boolean) {
+    for(const helper of this.helpers) {
+      helper.toggleListNavigation(enabled);
+    }
+  }
+
   public getMiddleware() {
     this.middleware.clean();
     return this.middleware.get();
@@ -29,11 +35,15 @@ export default class AutocompleteHelperController {
     this.helpers.add(helper);
   }
 
-  public hideOtherHelpers(helper?: AutocompleteHelper) {
-    this.helpers.forEach(h => {
-      if(h !== helper) {
-        h.toggle(true);
+  public hideOtherHelpers(preserveHelper?: AutocompleteHelper) {
+    this.helpers.forEach(helper => {
+      if(helper !== preserveHelper) {
+        helper.toggle(true, true);
       }
     });
+
+    if(!preserveHelper) {
+      this.middleware.clean();
+    }
   }
 }

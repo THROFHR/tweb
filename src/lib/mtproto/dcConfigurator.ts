@@ -9,19 +9,23 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import MTTransport, { MTConnection, MTConnectionConstructable } from './transports/transport';
+import MTTransport, { MTConnectionConstructable } from './transports/transport';
 import Modes from '../../config/modes';
+import App from '../../config/app';
+import indexOfAndSplice from '../../helpers/array/indexOfAndSplice';
+import { MOUNT_CLASS_TO } from '../../config/debug';
 
-/// #if MTPROTO_HTTP || MTPROTO_HTTP_UPLOAD
+/// #if MTPROTO_HAS_HTTP
 import HTTP from './transports/http';
 /// #endif
 
-/// #if !MTPROTO_HTTP
+/// #if MTPROTO_HAS_WS
 import Socket from './transports/websocket';
 import TcpObfuscated from './transports/tcpObfuscated';
-import EventListenerBase from '../../helpers/eventListenerBase';
-import { isSafari } from '../../helpers/userAgent';
-import { notifyAll, isWebWorker } from '../../helpers/context';
+import { IS_SAFARI } from '../../environment/userAgent';
+import { IS_WEB_WORKER } from '../../helpers/context';
+import SocketProxied from './transports/socketProxied';
+import { DcId } from '../../types';
 /// #endif
 
 export type TransportType = 'websocket' | 'https' | 'http';
@@ -29,69 +33,12 @@ export type ConnectionType = 'client' | 'download' | 'upload';
 type Servers = {
   [transportType in TransportType]: {
     [connectionType in ConnectionType]: {
-      [dcId: number]: MTTransport[]
+      [dcId: DcId]: MTTransport[]
     }
   }
 };
 
-let socketId = 0;
 const TEST_SUFFIX = Modes.test ? '_test' : '';
-
-/// #if !MTPROTO_SW
-class SocketProxied extends EventListenerBase<{
-  open: () => void,
-  message: (buffer: ArrayBuffer) => any,
-  close: () => void,
-}> implements MTConnection {
-  private id: number;
-
-  constructor(protected dcId: number, protected url: string, logSuffix: string) {
-    super();
-    this.id = ++socketId;
-    socketsProxied.set(this.id, this);
-
-    notifyAll({
-      type: 'socketProxy',
-      payload: {
-        type: 'setup', 
-        payload: {
-          dcId, 
-          url,
-          logSuffix
-        },
-        id: this.id
-      }
-    });
-  }
-
-  public send(payload: Uint8Array) {
-    const task: any = {
-      type: 'socketProxy', 
-      payload: {
-        type: 'send',
-        payload,
-        id: this.id
-      }
-    };
-
-    notifyAll(task);
-  }
-
-  public close() {
-    const task: any = {
-      type: 'socketProxy',
-      payload: {
-        type: 'close',
-        id: this.id
-      }
-    };
-
-    notifyAll(task);
-  }
-}
-/// #endif
-
-export const socketsProxied: Map<number, SocketProxied> = new Map();
 
 export class DcConfigurator {
   private sslSubdomains = ['pluto', 'venus', 'aurora', 'vesta', 'flora'];
@@ -110,42 +57,49 @@ export class DcConfigurator {
       {id: 5, host: '149.154.171.5',   port: 80}
     ];
 
-  private chosenServers: Servers = {} as any;
+  public chosenServers: Servers = {} as any;
 
-  /// #if !MTPROTO_HTTP
-  private transportSocket = (dcId: number, connectionType: ConnectionType) => {
-    const subdomain = this.sslSubdomains[dcId - 1];
+  /// #if MTPROTO_HAS_WS
+  private transportSocket = (dcId: DcId, connectionType: ConnectionType, suffix: string) => {
     const path = 'apiws' + TEST_SUFFIX;
-    const chosenServer = 'wss://' + subdomain + '.web.telegram.org/' + path;
+    const chosenServer = `wss://${App.suffix.toLowerCase()}ws${dcId}${suffix}.web.telegram.org/${path}`;
     const logSuffix = connectionType === 'upload' ? '-U' : connectionType === 'download' ? '-D' : '';
 
     const retryTimeout = connectionType === 'client' ? 10000 : 10000;
 
-    const oooohLetMeLive: MTConnectionConstructable = (isSafari && isWebWorker && typeof(SocketProxied) !== 'undefined') /* || true */ ? SocketProxied : Socket;
+    const oooohLetMeLive: MTConnectionConstructable = (IS_SAFARI && IS_WEB_WORKER && typeof(SocketProxied) !== 'undefined') /* || true */ ? SocketProxied : Socket;
 
     return new TcpObfuscated(oooohLetMeLive, dcId, chosenServer, logSuffix, retryTimeout);
   };
   /// #endif
 
-  /// #if MTPROTO_HTTP_UPLOAD || MTPROTO_HTTP
-  private transportHTTP = (dcId: number, connectionType: ConnectionType) => {
+  /// #if MTPROTO_HAS_HTTP
+  private transportHTTP = (dcId: DcId, connectionType: ConnectionType, suffix: string) => {
+    let chosenServer: string;
     if(Modes.ssl || !Modes.http) {
       const subdomain = this.sslSubdomains[dcId - 1] + (connectionType !== 'client' ? '-1' : '');
       const path = Modes.test ? 'apiw_test1' : 'apiw1';
-      const chosenServer = 'https://' + subdomain + '.web.telegram.org/' + path;
-      return new HTTP(dcId, chosenServer);
+      chosenServer = 'https://' + subdomain + '.web.telegram.org/' + path;
     } else {
       for(let dcOption of this.dcOptions) {
         if(dcOption.id === dcId) {
-          const chosenServer = 'http://' + dcOption.host + (dcOption.port !== 80 ? ':' + dcOption.port : '') + '/apiw1';
-          return new HTTP(dcId, chosenServer);
+          chosenServer = 'http://' + dcOption.host + (dcOption.port !== 80 ? ':' + dcOption.port : '') + '/apiw1';
+          break;
         }
       }
     }
+
+    const logSuffix = connectionType === 'upload' ? '-U' : connectionType === 'download' ? '-D' : '';
+    return new HTTP(dcId, chosenServer, logSuffix);
   };
   /// #endif
 
-  public chooseServer(dcId: number, connectionType: ConnectionType = 'client', transportType: TransportType = 'websocket', reuse = true) {
+  public chooseServer(
+    dcId: DcId, 
+    connectionType: ConnectionType = 'client', 
+    transportType: TransportType = Modes.transport, 
+    reuse = true
+  ) {
     /* if(transportType === 'websocket' && !Modes.multipleConnections) {
       connectionType = 'client';
     } */
@@ -169,12 +123,14 @@ export class DcConfigurator {
     if(!transports.length || !reuse/*  || (upload && transports.length < 1) */) {
       let transport: MTTransport;
 
-      /// #if MTPROTO_HTTP_UPLOAD
-      transport = (transportType === 'websocket' ? this.transportSocket : this.transportHTTP)(dcId, connectionType);
+      const suffix = connectionType === 'client' ? '' : '-1';
+
+      /// #if MTPROTO_HAS_WS && MTPROTO_HAS_HTTP
+      transport = (transportType === 'websocket' ? this.transportSocket : this.transportHTTP)(dcId, connectionType, suffix);
       /// #elif !MTPROTO_HTTP
-      transport = this.transportSocket(dcId, connectionType);
+      transport = this.transportSocket(dcId, connectionType, suffix);
       /// #else
-      transport = this.transportHTTP(dcId, connectionType);
+      transport = this.transportHTTP(dcId, connectionType, suffix);
       /// #endif
   
       if(!transport) {
@@ -191,6 +147,22 @@ export class DcConfigurator {
   
     return transports[0];
   }
+  
+  public static removeTransport<T>(obj: any, transport: T) {
+    for(const transportType in obj) {
+      // @ts-ignore
+      for(const connectionType in obj[transportType]) {
+        // @ts-ignore
+        for(const dcId in obj[transportType][connectionType]) {
+          // @ts-ignore
+          const transports: T[] = obj[transportType][connectionType][dcId];
+          indexOfAndSplice(transports, transport);
+        }
+      }
+    }
+  }
 }
 
-export default new DcConfigurator();
+const dcConfigurator = new DcConfigurator();
+MOUNT_CLASS_TO && (MOUNT_CLASS_TO.dcConfigurator = dcConfigurator);
+export default dcConfigurator;

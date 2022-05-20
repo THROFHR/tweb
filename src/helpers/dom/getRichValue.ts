@@ -27,8 +27,17 @@ export default function getRichValue(field: HTMLElement, withEntities = true) {
   let value = lines.join('\n');
   value = value.replace(/\u00A0/g, ' ');
 
-  if(entities) {
+  if(entities?.length) {
+    // ! cannot do that here because have the same check before the sending in RichTextProcessor.parseMarkdown
+    /* const entity = entities[entities.length - 1];
+    const length = value.length;
+    const trimmedLength = value.trimRight().length;
+    if(length !== trimmedLength) {
+      entity.length -= length - trimmedLength;
+    } */
+
     RichTextProcessor.combineSameEntities(entities);
+    RichTextProcessor.sortEntities(entities);
   }
 
   //console.log('getRichValue:', value, entities);

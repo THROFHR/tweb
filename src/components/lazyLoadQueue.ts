@@ -4,10 +4,12 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { throttle } from "../helpers/schedulers";
 import { logger, LogTypes } from "../lib/logger";
 import VisibilityIntersector, { OnVisibilityChange } from "./visibilityIntersector";
-import { findAndSpliceAll } from "../helpers/array";
+import throttle from "../helpers/schedulers/throttle";
+import findAndSpliceAll from "../helpers/array/findAndSpliceAll";
+import indexOfAndSplice from "../helpers/array/indexOfAndSplice";
+import findAndSplice from "../helpers/array/findAndSplice";
 
 type LazyLoadElementBase = {
   load: () => Promise<any>
@@ -87,7 +89,7 @@ export class LazyLoadQueueBase {
       //await item.load(item.div);
       await this.loadItem(item);
     } catch(err) {
-      if(!['NO_ENTRY_FOUND', 'STORAGE_OFFLINE'].includes(err)) {
+      if(!['NO_ENTRY_FOUND', 'STORAGE_OFFLINE'].includes(err as string)) {
         this.log.error('loadMediaQueue error:', err/* , item */);
       }
     }
@@ -121,7 +123,7 @@ export class LazyLoadQueueBase {
     let added = 0;
     do {
       if(item) {
-        this.queue.findAndSplice(i => i === item);
+        indexOfAndSplice(this.queue, item);
       } else {
         item = this.getItem();
       }
@@ -251,7 +253,7 @@ export default class LazyLoadQueue extends LazyLoadQueueIntersector {
   };
 
   protected getItem() {
-    return this.queue.findAndSplice(item => item.wasSeen);
+    return findAndSplice(this.queue, item => item.wasSeen);
   }
 
   public async processItem(item: LazyLoadElement) {

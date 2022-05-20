@@ -10,26 +10,37 @@
  */
 
 import { FileURLType, getFileNameByLocation, getFileURL } from '../../helpers/fileName';
-import { safeReplaceArrayInObject, defineNotNumerableProperties, isObject } from '../../helpers/object';
-import { Document, InputFileLocation, PhotoSize } from '../../layer';
+import { Document, InputFileLocation, InputMedia, PhotoSize } from '../../layer';
 import referenceDatabase, { ReferenceContext } from '../mtproto/referenceDatabase';
 import opusDecodeController from '../opusDecodeController';
 import { RichTextProcessor } from '../richtextprocessor';
-import webpWorkerController from '../webp/webpWorkerController';
 import appDownloadManager, { DownloadBlob } from './appDownloadManager';
 import appPhotosManager from './appPhotosManager';
 import blur from '../../helpers/blur';
 import apiManager from '../mtproto/mtprotoworker';
 import { MOUNT_CLASS_TO } from '../../config/debug';
 import { getFullDate } from '../../helpers/date';
+import rootScope from '../rootScope';
+import IS_WEBP_SUPPORTED from '../../environment/webpSupport';
+import IS_WEBM_SUPPORTED from '../../environment/webmSupport';
+import defineNotNumerableProperties from '../../helpers/object/defineNotNumerableProperties';
+import isObject from '../../helpers/object/isObject';
+import safeReplaceArrayInObject from '../../helpers/object/safeReplaceArrayInObject';
 
 export type MyDocument = Document.document;
 
 // TODO: если залить картинку файлом, а потом перезайти в диалог - превьюшка заново скачается
 
+const EXTENSION_MIME_TYPE_MAP = {
+  mov: 'video/quicktime',
+  gif: 'image/gif',
+  pdf: 'application/pdf',
+};
+
 export class AppDocsManager {
-  private docs: {[docId: string]: MyDocument} = {};
-  private savingLottiePreview: {[docId: string]: true} = {};
+  private docs: {[docId: DocId]: MyDocument} = {};
+  private savingLottiePreview: {[docId: DocId]: true} = {};
+  public downloading: Map<DocId, DownloadBlob> = new Map();
 
   constructor() {
     apiManager.onServiceWorkerFail = this.onServiceWorkerFail;
@@ -60,26 +71,28 @@ export class AppDocsManager {
     }
     
     //console.log('saveDoc', apiDoc, this.docs[apiDoc.id]);
-    if(oldDoc) {
-      //if(doc._ !== 'documentEmpty' && doc._ === d._) {
-        if(doc.thumbs) {
-          if(!oldDoc.thumbs) oldDoc.thumbs = doc.thumbs;
-          /* else if(apiDoc.thumbs[0].bytes && !d.thumbs[0].bytes) {
-            d.thumbs.unshift(apiDoc.thumbs[0]);
-          } else if(d.thumbs[0].url) { // fix for converted thumb in safari
-            apiDoc.thumbs[0] = d.thumbs[0];
-          } */
-        }
+    // if(oldDoc) {
+    //   //if(doc._ !== 'documentEmpty' && doc._ === d._) {
+    //     if(doc.thumbs) {
+    //       if(!oldDoc.thumbs) oldDoc.thumbs = doc.thumbs;
+    //       /* else if(apiDoc.thumbs[0].bytes && !d.thumbs[0].bytes) {
+    //         d.thumbs.unshift(apiDoc.thumbs[0]);
+    //       } else if(d.thumbs[0].url) { // fix for converted thumb in safari
+    //         apiDoc.thumbs[0] = d.thumbs[0];
+    //       } */
+    //     }
 
-      //}
+    //   //}
 
-      return oldDoc;
+    //   return oldDoc;
 
-      //return Object.assign(d, apiDoc, context);
-      //return context ? Object.assign(d, context) : d;
+    //   //return Object.assign(d, apiDoc, context);
+    //   //return context ? Object.assign(d, context) : d;
+    // }
+
+    if(!oldDoc) {
+      this.docs[doc.id] = doc;
     }
-
-    this.docs[doc.id] = doc;
 
     // * exclude from state
     // defineNotNumerableProperties(doc, [/* 'thumbs',  */'type', 'h', 'w', 'file_name', 
@@ -87,7 +100,8 @@ export class AppDocsManager {
     // 'audioPerformer', 'sticker', 'stickerEmoji', 'stickerEmojiRaw', 
     // 'stickerSetInput', 'stickerThumbConverted', 'animated', 'supportsStreaming']);
 
-    doc.attributes.forEach(attribute => {
+    for(let i = 0, length = doc.attributes.length; i < length; ++i) {
+      const attribute = doc.attributes[i];
       switch(attribute._) {
         case 'documentAttributeFilename':
           doc.file_name = RichTextProcessor.wrapPlainText(attribute.file_name);
@@ -95,8 +109,6 @@ export class AppDocsManager {
 
         case 'documentAttributeAudio':
           doc.duration = attribute.duration;
-          doc.audioTitle = attribute.title;
-          doc.audioPerformer = attribute.performer;
           doc.type = attribute.pFlags.voice && doc.mime_type === 'audio/ogg' ? 'voice' : 'audio';
           /* if(apiDoc.type === 'audio') {
             apiDoc.supportsStreaming = true;
@@ -118,7 +130,6 @@ export class AppDocsManager {
         case 'documentAttributeSticker':
           if(attribute.alt !== undefined) {
             doc.stickerEmojiRaw = attribute.alt;
-            doc.stickerEmoji = RichTextProcessor.wrapRichText(doc.stickerEmojiRaw, {noLinks: true, noLinebreaks: true});
           }
 
           if(attribute.stickerset) {
@@ -130,9 +141,17 @@ export class AppDocsManager {
           }
 
           // * there can be no thumbs, then it is a document
-          if(/* apiDoc.thumbs &&  */doc.mime_type === 'image/webp' && (doc.thumbs || webpWorkerController.isWebpSupported())) {
+          if(/* apiDoc.thumbs &&  */doc.mime_type === 'image/webp' && (doc.thumbs || IS_WEBP_SUPPORTED)) {
             doc.type = 'sticker';
             doc.sticker = 1;
+          } else if(doc.mime_type === 'video/webm') {
+            if(!IS_WEBM_SUPPORTED) {
+              return;
+            }
+
+            doc.type = 'sticker';
+            doc.sticker = 3;
+            doc.animated = true;
           }
           break;
 
@@ -150,32 +169,39 @@ export class AppDocsManager {
           doc.animated = true;
           break;
       }
-    });
+    }
     
     if(!doc.mime_type) {
-      switch(doc.type) {
-        case 'gif':
-        case 'video':
-        case 'round':
-          doc.mime_type = 'video/mp4';
-          break;
-        case 'sticker':
-          doc.mime_type = 'image/webp';
-          break;
-        case 'audio':
-          doc.mime_type = 'audio/mpeg';
-          break;
-        case 'voice':
-          doc.mime_type = 'audio/ogg';
-          break;
-        default:
-          doc.mime_type = 'application/octet-stream';
-          break;
+      const ext = (doc.file_name || '').split('.').pop();
+      // @ts-ignore
+      const mappedMimeType = ext && EXTENSION_MIME_TYPE_MAP[ext.toLowerCase()];
+      if(mappedMimeType) {
+        doc.mime_type = mappedMimeType;
+      } else {
+        switch(doc.type) {
+          case 'gif':
+          case 'video':
+          case 'round':
+            doc.mime_type = 'video/mp4';
+            break;
+          case 'sticker':
+            doc.mime_type = 'image/webp';
+            break;
+          case 'audio':
+            doc.mime_type = 'audio/mpeg';
+            break;
+          case 'voice':
+            doc.mime_type = 'audio/ogg';
+            break;
+          default:
+            doc.mime_type = 'application/octet-stream';
+            break;
+        }
       }
-    }
-
-    if(doc.mime_type === 'application/pdf') {
+    } else if(doc.mime_type === EXTENSION_MIME_TYPE_MAP.pdf) {
       doc.type = 'pdf';
+    } else if(doc.mime_type === EXTENSION_MIME_TYPE_MAP.gif) {
+      doc.type = 'gif';
     }
 
     if(doc.type === 'voice' || doc.type === 'round') {
@@ -184,7 +210,7 @@ export class AppDocsManager {
     }
 
     if(apiManager.isServiceWorkerOnline()) {
-      if((doc.type === 'gif' && doc.size > 8e6) || doc.type === 'audio' || doc.type === 'video') {
+      if((doc.type === 'gif' && doc.size > 8e6) || doc.type === 'audio' || doc.type === 'video'/*  || doc.mime_type.indexOf('video/') === 0 */) {
         doc.supportsStreaming = true;
         
         const cacheContext = appDownloadManager.getCacheContext(doc);
@@ -212,14 +238,18 @@ export class AppDocsManager {
       doc.url = this.getFileURL(doc);
     } */
 
+    if(oldDoc) {
+      return Object.assign(oldDoc, doc);
+    }
+
     return doc;
   }
   
-  public getDoc(docId: string | MyDocument): MyDocument {
-    return isObject(docId) && typeof(docId) !== 'string' ? docId as any : this.docs[docId as string] as any;
+  public getDoc(docId: DocId | MyDocument): MyDocument {
+    return isObject<MyDocument>(docId) ? docId : this.docs[docId];
   }
 
-  public getMediaInput(doc: MyDocument) {
+  public getMediaInput(doc: MyDocument): InputMedia.inputMediaDocument {
     return {
       _: 'inputMediaDocument',
       id: {
@@ -284,8 +314,9 @@ export class AppDocsManager {
     const cacheContext = appDownloadManager.getCacheContext(doc, thumb.type);
     if(!cacheContext.url) {
       if('bytes' in thumb) {
-        promise = blur(appPhotosManager.getPreviewURLFromBytes(thumb.bytes, !!doc.sticker)).then(url => {
-          cacheContext.url = url;
+        const result = blur(appPhotosManager.getPreviewURLFromBytes(thumb.bytes, !!doc.sticker));
+        promise = result.promise.then(() => {
+          cacheContext.url = result.canvas.toDataURL();
         }) as any;
       } else {
         //return this.getFileURL(doc, false, thumb);
@@ -316,13 +347,17 @@ export class AppDocsManager {
 
     const downloadOptions = this.getFileDownloadOptions(doc, undefined, queueId, onlyCache);
     download = appDownloadManager.download(downloadOptions);
+    this.downloading.set(doc.id, download);
+    rootScope.dispatchEvent('download_start', doc.id);
 
     const cacheContext = appDownloadManager.getCacheContext(doc);
     const originalPromise = download;
     originalPromise.then((blob) => {
       cacheContext.url = URL.createObjectURL(blob);
       cacheContext.downloaded = blob.size;
-    }, () => {});
+    }, () => {}).finally(() => {
+      this.downloading.delete(doc.id);
+    });
     
     if(doc.type === 'voice' && !opusDecodeController.isPlaySupported()) {
       download = originalPromise.then(async(blob) => {
@@ -348,7 +383,16 @@ export class AppDocsManager {
       });
     }
 
+    download.then(() => {
+      rootScope.dispatchEvent('document_downloaded', doc);
+    });
+
     return download;
+  }
+
+  public isSavingLottiePreview(doc: MyDocument, toneIndex: number) {
+    const key = doc.id + '-' + toneIndex;
+    return !!this.savingLottiePreview[key];
   }
 
   public saveLottiePreview(doc: MyDocument, canvas: HTMLCanvasElement, toneIndex: number) {

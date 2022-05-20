@@ -5,18 +5,23 @@
  */
 
 import DEBUG, { MOUNT_CLASS_TO } from "../config/debug";
-import { safeAssign } from "../helpers/object";
-import { capitalizeFirstLetter } from "../helpers/string";
 import type lang from "../lang";
 import type langSign from "../langSign";
-import { LangPackDifference, LangPackString } from "../layer";
+import type { State } from "./appManagers/appStateManager";
+import { HelpCountriesList, HelpCountry, LangPackDifference, LangPackString } from "../layer";
 import apiManager from "./mtproto/mtprotoworker";
-import sessionStorage from "./sessionStorage";
+import stateStorage from "./stateStorage";
 import App from "../config/app";
 import rootScope from "./rootScope";
+import RichTextProcessor from "./richtextprocessor";
+import { IS_MOBILE } from "../environment/userAgent";
+import deepEqual from "../helpers/object/deepEqual";
+import safeAssign from "../helpers/object/safeAssign";
+import capitalizeFirstLetter from "../helpers/string/capitalizeFirstLetter";
 
 export const langPack: {[actionType: string]: LangPackKey} = {
   "messageActionChatCreate": "ActionCreateGroup",
+  "messageActionChatCreateYou": "ActionYouCreateGroup",
 	"messageActionChatEditTitle": "ActionChangedTitle",
 	"messageActionChatEditPhoto": "ActionChangedPhoto",
 	"messageActionChatEditVideo": "ActionChangedVideo",
@@ -31,7 +36,7 @@ export const langPack: {[actionType: string]: LangPackKey} = {
 	"messageActionChatLeaveYou": "YouLeft",
 	"messageActionChatDeleteUser": "ActionKickUser",
 	"messageActionChatJoinedByLink": "ActionInviteUser",
-  "messageActionPinMessage": "ActionPinnedNoText",
+  "messageActionPinMessage": "Chat.Service.Group.UpdatedPinnedMessage",
   "messageActionContactSignUp": "Chat.Service.PeerJoinedTelegram",
 	"messageActionChannelCreate": "ActionCreateChannel",
 	"messageActionChannelEditTitle": "Chat.Service.Channel.UpdatedTitle",
@@ -39,30 +44,50 @@ export const langPack: {[actionType: string]: LangPackKey} = {
 	"messageActionChannelEditVideo": "Chat.Service.Channel.UpdatedVideo",
   "messageActionChannelDeletePhoto": "Chat.Service.Channel.RemovedPhoto",
   "messageActionHistoryClear": "HistoryCleared",
+	"messageActionDiscussionStarted": "DiscussionStarted",
 
   "messageActionChannelMigrateFrom": "ActionMigrateFromGroup",
 
+  "messageActionPhoneCall.video_in_ok": "ChatList.Service.VideoCall.incoming",
+	"messageActionPhoneCall.video_out_ok": "ChatList.Service.VideoCall.outgoing",
+	"messageActionPhoneCall.video_missed": "ChatList.Service.VideoCall.Missed",
+	"messageActionPhoneCall.video_cancelled": "ChatList.Service.VideoCall.Cancelled",
   "messageActionPhoneCall.in_ok": "ChatList.Service.Call.incoming",
 	"messageActionPhoneCall.out_ok": "ChatList.Service.Call.outgoing",
-	"messageActionPhoneCall.in_missed": "ChatList.Service.Call.Missed",
-	"messageActionPhoneCall.out_missed": "ChatList.Service.Call.Cancelled",
+	"messageActionPhoneCall.missed": "ChatList.Service.Call.Missed",
+	"messageActionPhoneCall.cancelled": "ChatList.Service.Call.Cancelled",
+
+	"messageActionGroupCall.started": "Chat.Service.VoiceChatStarted.Channel",
+	"messageActionGroupCall.started_by": "Chat.Service.VoiceChatStarted",
+	"messageActionGroupCall.started_byYou": "Chat.Service.VoiceChatStartedYou",
+	"messageActionGroupCall.ended": "Chat.Service.VoiceChatFinished.Channel",
+	"messageActionGroupCall.ended_by": "Chat.Service.VoiceChatFinished",
+	"messageActionGroupCall.ended_byYou": "Chat.Service.VoiceChatFinishedYou",
 
 	"messageActionBotAllowed": "Chat.Service.BotPermissionAllowed"
 };
 
 export type LangPackKey = /* string |  */keyof typeof lang | keyof typeof langSign;
 
+export type FormatterArgument = string | number | Node | FormatterArgument[];
+export type FormatterArguments = FormatterArgument[];
+
+export const UNSUPPORTED_LANG_PACK_KEY: LangPackKey = IS_MOBILE ? 'Message.Unsupported.Mobile' : 'Message.Unsupported.Desktop';
+
 namespace I18n {
 	export const strings: Map<LangPackKey, LangPackString> = new Map();
+	export const countriesList: HelpCountry[] = [];
 	let pluralRules: Intl.PluralRules;
 
 	let cacheLangPackPromise: Promise<LangPackDifference>;
 	export let lastRequestedLangCode: string;
+	export let lastAppliedLangCode: string;
 	export let requestedServerLanguage = false;
+  export let timeFormat: State['settings']['timeFormat'];
 	export function getCacheLangPack(): Promise<LangPackDifference> {
 		if(cacheLangPackPromise) return cacheLangPackPromise;
 		return cacheLangPackPromise = Promise.all([
-			sessionStorage.get('langPack') as Promise<LangPackDifference>,
+			stateStorage.get('langPack') as Promise<LangPackDifference>,
 			polyfillPromise
 		]).then(([langPack]) => {
 			if(!langPack/*  || true */) {
@@ -84,13 +109,53 @@ namespace I18n {
 		});
 	}
 
+  function updateAmPm() {
+    if(timeFormat === 'h12') {
+      try {
+        const dateTimeFormat = getDateTimeFormat({hour: 'numeric', minute: 'numeric', hour12: true});
+        const date = new Date();
+        date.setHours(0);
+        const amText = dateTimeFormat.format(date);
+        amPmCache.am = amText.split(' ')[1];
+        date.setHours(12);
+        const pmText = dateTimeFormat.format(date);
+        amPmCache.pm = pmText.split(' ')[1];
+      } catch(err) {
+        console.error('cannot get am/pm', err);
+        amPmCache = {am: 'AM', pm: 'PM'};
+      }
+    }
+  }
+
+  export function setTimeFormat(
+    format: State['settings']['timeFormat'],
+    haveToUpdate = !!timeFormat && timeFormat !== format
+  ) {
+    timeFormat = format;
+
+    updateAmPm();
+
+    if(haveToUpdate) {
+      cachedDateTimeFormats.clear();
+      const elements = Array.from(document.querySelectorAll(`.i18n`)) as HTMLElement[];
+      elements.forEach(element => {
+        const instance = weakMap.get(element);
+
+        if(instance instanceof IntlDateElement) {
+          instance.update();
+        }
+      });
+    }
+  }
+
 	export function loadLocalLangPack() {
 		const defaultCode = App.langPackCode;
 		lastRequestedLangCode = defaultCode;
 		return Promise.all([
 			import('../lang'),
-			import('../langSign')
-		]).then(([lang, langSign]) => {
+			import('../langSign'),
+			import('../countries')
+		]).then(([lang, langSign, countries]) => {
 			const strings: LangPackString[] = [];
 			formatLocalStrings(lang.default, strings);
 			formatLocalStrings(langSign.default, strings);
@@ -101,7 +166,8 @@ namespace I18n {
 				lang_code: defaultCode,
 				strings,
 				version: 0,
-				local: true
+				local: true,
+				countries: countries.default
 			};
 			return saveLangPack(langPack);
 		});
@@ -120,7 +186,11 @@ namespace I18n {
 			}),
 			import('../lang'),
 			import('../langSign'),
-			polyfillPromise
+			apiManager.invokeApiCacheable('help.getCountriesList', {
+				lang_code: langCode,
+				hash: 0
+			}) as Promise<HelpCountriesList.helpCountriesList>,
+			polyfillPromise,
 		]);
 	}
 
@@ -156,28 +226,29 @@ namespace I18n {
 
 	export function getLangPack(langCode: string) {
 		lastRequestedLangCode = langCode;
-		return loadLangPack(langCode).then(([langPack, _langPack, __langPack, ___langPack, _]) => {
+		return loadLangPack(langCode).then(([langPack1, langPack2, localLangPack1, localLangPack2, countries, _]) => {
 			let strings: LangPackString[] = [];
 
-			[__langPack, ___langPack].forEach(l => {
+			[localLangPack1, localLangPack2].forEach(l => {
 				formatLocalStrings(l.default as any, strings);
 			});
 
-			strings = strings.concat(langPack.strings);
+			strings = strings.concat(langPack1.strings);
 
-			for(const string of _langPack.strings) {
+			for(const string of langPack2.strings) {
 				strings.push(string);
 			}
 
-			langPack.strings = strings;
-			return saveLangPack(langPack);
+			langPack1.strings = strings;
+			langPack1.countries = countries;
+			return saveLangPack(langPack1);
 		});
 	}
 
 	export function saveLangPack(langPack: LangPackDifference) {
 		langPack.appVersion = App.langPackVersion;
 
-		return sessionStorage.set({langPack}).then(() => {
+		return stateStorage.set({langPack}).then(() => {
 			applyLangPack(langPack);
 			return langPack;
 		});
@@ -198,7 +269,12 @@ namespace I18n {
 			return;
 		}
 
-		pluralRules = new Intl.PluralRules(langPack.lang_code);
+		try {
+			pluralRules = new Intl.PluralRules(langPack.lang_code);
+		} catch(err) {
+			console.error('pluralRules error', err);
+			pluralRules = new Intl.PluralRules(langPack.lang_code.split('-', 1)[0]);
+		}
 
 		strings.clear();
 
@@ -206,7 +282,28 @@ namespace I18n {
 			strings.set(string.key as LangPackKey, string);
 		}
 
-		rootScope.broadcast('language_change');
+		if(langPack.countries) {
+			countriesList.length = 0;
+			countriesList.push(...langPack.countries.countries);
+
+			langPack.countries.countries.forEach(country => {
+				if(country.name) {
+					const langPackKey: any = country.default_name;
+					strings.set(langPackKey, {
+						_: 'langPackString',
+						key: langPackKey,
+						value: country.name
+					});
+				}
+			});
+		}
+
+		if(lastAppliedLangCode !== langPack.lang_code) {
+			rootScope.dispatchEvent('language_change', langPack.lang_code);
+			lastAppliedLangCode = langPack.lang_code;
+      cachedDateTimeFormats.clear();
+      updateAmPm();
+		}
 
 		const elements = Array.from(document.querySelectorAll(`.i18n`)) as HTMLElement[];
 		elements.forEach(element => {
@@ -218,30 +315,66 @@ namespace I18n {
 		});
 	}
 
-	export function superFormatter(input: string, args?: any[], indexHolder = {i: 0}) {
-		let out: (string | HTMLElement)[] = [];
-		const regExp = /(\*\*)(.+?)\1|(\n)|un\d|%\d\$.|%./g;
+  function pushNextArgument(out: ReturnType<typeof superFormatter>, args: FormatterArguments, indexHolder: {i: number}) {
+    const arg = args[indexHolder.i++];
+		if(Array.isArray(arg)) {
+			out.push(...arg as any);
+		} else {
+			out.push(arg);
+		}
+  }
+
+	export function superFormatter(input: string, args?: FormatterArguments, indexHolder = {i: 0}): Exclude<FormatterArgument, FormatterArgument[]>[] {
+		let out: ReturnType<typeof superFormatter> = [];
+		const regExp = /(\*\*|__)(.+?)\1|(\n)|(\[.+?\]\(.*?\))|un\d|%\d\$.|%./g;
 
 		let lastIndex = 0;
-		input.replace(regExp, (match, p1: any, p2: any, p3: any, offset: number, string: string) => {
+		input.replace(regExp, (match, p1: any, p2: any, p3: any, p4: string, offset: number, string: string) => {
 			//console.table({match, p1, p2, offset, string});
 
 			out.push(string.slice(lastIndex, offset));
 
 			if(p1) {
 				//offset += p1.length;
+        let element: HTMLElement;
 				switch(p1) {
 					case '**': {
-						const b = document.createElement('b');
-						b.append(...superFormatter(p2, args, indexHolder));
-						out.push(b);
+            element = document.createElement('b');
 						break;
 					}
+
+          case '__': {
+            element = document.createElement('i');
+            break;
+          }
 				}
+
+        element.append(...superFormatter(p2, args, indexHolder) as any);
+        out.push(element);
 			} else if(p3) {
 				out.push(document.createElement('br'));
+			} else if(p4) {
+        const idx = p4.lastIndexOf(']');
+				const text = p4.slice(1, idx);
+        
+				const url = p4.slice(idx + 2, p4.length - 1);
+        let a: HTMLAnchorElement;
+				if(url && RichTextProcessor.matchUrlProtocol(url)) {
+          a = document.createElement('a');
+          const wrappedUrl = RichTextProcessor.wrapUrl(url);
+          a.href = wrappedUrl.url;
+          if(wrappedUrl.onclick) a.setAttribute('onclick', wrappedUrl.onclick);
+          a.target = '_blank';
+				} else {
+          a = args[indexHolder.i++] as HTMLAnchorElement;
+          a.textContent = ''; // reset content
+        }
+
+        a.append(...superFormatter(text, args, indexHolder) as any);
+
+				out.push(a);
 			} else if(args) {
-				out.push(args[indexHolder.i++]);
+        pushNextArgument(out, args, indexHolder);
 			}
 
 			lastIndex = offset + match.length;
@@ -255,9 +388,9 @@ namespace I18n {
 		return out;
 	}
 	
-	export function format(key: LangPackKey, plain: true, args?: any[]): string;
-	export function format(key: LangPackKey, plain?: false, args?: any[]): (string | HTMLElement)[];
-	export function format(key: LangPackKey, plain = false, args?: any[]): (string | HTMLElement)[] | string {
+	export function format(key: LangPackKey, plain: true, args?: FormatterArguments): string;
+	export function format(key: LangPackKey, plain?: false, args?: FormatterArguments): ReturnType<typeof superFormatter>;
+	export function format(key: LangPackKey, plain = false, args?: FormatterArguments): ReturnType<typeof superFormatter> | string {
 		const str = strings.get(key);
 		let input: string;
 		if(str) {
@@ -277,8 +410,15 @@ namespace I18n {
 			//input = '[' + key + ']';
 			input = key;
 		}
+
+    const result = superFormatter(input, args);
+    if(plain) { // * let's try a hack now... (don't want to replace []() entity)
+      return result.map(item => item instanceof Node ? item.textContent : item).join('');
+    } else {
+      return result;
+    }
 		
-		if(plain) {
+		/* if(plain) {
 			if(args?.length) {
 				const regExp = /un\d|%\d\$.|%./g;
 				let i = 0;
@@ -290,25 +430,29 @@ namespace I18n {
 			return input;
 		} else {
 			return superFormatter(input, args);
-		}
+		} */
 	}
 
 	export const weakMap: WeakMap<HTMLElement, IntlElementBase<IntlElementBaseOptions>> = new WeakMap();
 
 	export type IntlElementBaseOptions = {
 		element?: HTMLElement,
-		property?: /* 'innerText' |  */'innerHTML' | 'placeholder',
+		property?: 'innerText' | 'innerHTML' | 'placeholder' | 'textContent',
 	};
 
 	abstract class IntlElementBase<Options extends IntlElementBaseOptions> {
 		public element: IntlElementBaseOptions['element'];
-		public property: IntlElementBaseOptions['property'] = 'innerHTML';
+		public property: IntlElementBaseOptions['property'];
 	
-		constructor(options: Options) {
-			this.element = options.element || document.createElement('span');
+		constructor(options?: Options) {
+			this.element = options?.element || document.createElement('span');
 			this.element.classList.add('i18n');
 			
-			this.update(options);
+      this.property = options?.property;
+      if(options && ((options as any as IntlElementOptions).key || (options as any as IntlDateElementOptions).date)) {
+        this.update(options);
+      }
+
 			weakMap.set(this.element, this);
 		}
 
@@ -316,19 +460,23 @@ namespace I18n {
 	}
 
 	export type IntlElementOptions = IntlElementBaseOptions & {
-		key: LangPackKey,
-		args?: any[]
+		key?: LangPackKey,
+		args?: FormatterArguments
 	};
 	export class IntlElement extends IntlElementBase<IntlElementOptions> {
 		public key: IntlElementOptions['key'];
 		public args: IntlElementOptions['args'];
+
+    constructor(options: IntlElementOptions = {}) {
+      super({...options, property: options.property ?? 'innerHTML'});
+    }
 
 		public update(options?: IntlElementOptions) {
 			safeAssign(this, options);
 	
 			if(this.property === 'innerHTML') {
 				this.element.textContent = '';
-				this.element.append(...format(this.key, false, this.args));
+				this.element.append(...format(this.key, false, this.args) as any);
 			} else {
 				// @ts-ignore
 				const v = this.element[this.property];
@@ -339,29 +487,65 @@ namespace I18n {
 				else (this.element as HTMLInputElement)[this.property] = formatted;
 			}
 		}
+
+    public compareAndUpdate(options?: IntlElementOptions) {
+      if(this.key === options.key && deepEqual(this.args, options.args)) {
+        return;
+      }
+
+      return this.update(options);
+    }
 	}
 
+  const cachedDateTimeFormats: Map<string, Intl.DateTimeFormat> = new Map();
+  function getDateTimeFormat(options: Intl.DateTimeFormatOptions = {}) {
+    let json = JSON.stringify(options);
+    let dateTimeFormat = cachedDateTimeFormats.get(json);
+    if(!dateTimeFormat) {
+      cachedDateTimeFormats.set(json, dateTimeFormat = new Intl.DateTimeFormat(lastRequestedLangCode + '-u-hc-' + timeFormat, options));
+    }
+
+    return dateTimeFormat;
+  }
+
+  export let amPmCache = {am: 'AM', pm: 'PM'};
 	export type IntlDateElementOptions = IntlElementBaseOptions & {
-		date: Date,
+		date?: Date,
 		options: Intl.DateTimeFormatOptions
 	};
 	export class IntlDateElement extends IntlElementBase<IntlDateElementOptions> {
 		public date: IntlDateElementOptions['date'];
 		public options: IntlDateElementOptions['options'];
 
+    constructor(options: IntlDateElementOptions) {
+      super({...options, property: options.property ?? 'textContent'});
+    }
+
 		public update(options?: IntlDateElementOptions) {
 			safeAssign(this, options);
 	
-			//var options = { month: 'long', day: 'numeric' };
-			
-			// * https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/Locale/hourCycle#adding_an_hour_cycle_via_the_locale_string
-			const dateTimeFormat = new Intl.DateTimeFormat(lastRequestedLangCode + '-u-hc-h23', this.options);
-			
-			(this.element as any)[this.property] = capitalizeFirstLetter(dateTimeFormat.format(this.date));
+      let text: string;
+      if(this.options.hour && this.options.minute && Object.keys(this.options).length === 2/*  && false */) {
+        let hours = this.date.getHours();
+        text = ('0' + (timeFormat === 'h12' ? (hours % 12) || 12 : hours)).slice(-2) + ':' + ('0' + this.date.getMinutes()).slice(-2);
+        // if(this.options.second) {
+        //   text += ':' + ('0' + this.date.getSeconds()).slice(-2);
+        // }
+
+        if(timeFormat === 'h12') {
+          text += ' ' + (hours < 12 ? amPmCache.am : amPmCache.pm);
+        }
+      } else {
+        // * https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/Locale/hourCycle#adding_an_hour_cycle_via_the_locale_string
+        const dateTimeFormat = getDateTimeFormat(this.options);
+        text = capitalizeFirstLetter(dateTimeFormat.format(this.date));
+      }
+
+      (this.element as any)[this.property] = text;
 		}
 	}
 
-	export function i18n(key: LangPackKey, args?: any[]) {
+	export function i18n(key: LangPackKey, args?: FormatterArguments) {
 		return new IntlElement({key, args}).element;
 	}
 	
@@ -369,7 +553,7 @@ namespace I18n {
 		return new IntlElement(options).element;
 	}
 
-	export function _i18n(element: HTMLElement, key: LangPackKey, args?: any[], property?: IntlElementOptions['property']) {
+	export function _i18n(element: HTMLElement, key: LangPackKey, args?: FormatterArguments, property?: IntlElementOptions['property']) {
 		return new IntlElement({element, key, args, property}).element;
 	}
 }
@@ -386,16 +570,28 @@ export {i18n_};
 const _i18n = I18n._i18n;
 export {_i18n};
 
-export function join(elements: HTMLElement[], useLast = true) {
-	const arr: HTMLElement[] = elements.slice(0, 1);
+export function joinElementsWith(elements: (Node | string)[], joiner: typeof elements[0] | ((isLast: boolean) => typeof elements[0])) {
+	const arr = elements.slice(0, 1);
   for(let i = 1; i < elements.length; ++i) {
     const isLast = (elements.length - 1) === i;
-    const delimiterKey: LangPackKey = isLast && useLast ? 'WordDelimiterLast' : 'WordDelimiter';
-    arr.push(i18n(delimiterKey));
+    arr.push(typeof(joiner) === 'function' ? joiner(isLast) : joiner);
     arr.push(elements[i]);
   }
 
 	return arr;
+}
+
+
+export function join(elements: (Node | string)[], useLast: boolean, plain: true): string;
+export function join(elements: (Node | string)[], useLast?: boolean, plain?: false): (string | Node)[];
+export function join(elements: (Node | string)[], useLast: boolean, plain: boolean): string | (string | Node)[];
+export function join(elements: (Node | string)[], useLast = true, plain?: boolean): string | (string | Node)[] {
+	const joined = joinElementsWith(elements, (isLast) => {
+    const langPackKey: LangPackKey = isLast && useLast ? 'AutoDownloadSettings.LastDelimeter' : 'AutoDownloadSettings.Delimeter';
+    return plain ? I18n.format(langPackKey, true) : i18n(langPackKey);
+  });
+
+  return plain ? joined.join('') : joined;
 }
 
 MOUNT_CLASS_TO.I18n = I18n;

@@ -18,10 +18,13 @@ import serverTimeManager from "../mtproto/serverTimeManager";
 import { MessageEntity, DraftMessage, MessagesSaveDraft } from "../../layer";
 import apiManager from "../mtproto/mtprotoworker";
 import { tsNow } from "../../helpers/date";
-import { deepEqual } from "../../helpers/object";
-import { isObject } from "../mtproto/bin_utils";
 import { MOUNT_CLASS_TO } from "../../config/debug";
-import sessionStorage from "../sessionStorage";
+import stateStorage from "../stateStorage";
+import appMessagesIdsManager from "./appMessagesIdsManager";
+import assumeType from "../../helpers/assumeType";
+import isObject from "../../helpers/object/isObject";
+import deepEqual from "../../helpers/object/deepEqual";
+import documentFragmentToHTML from "../../helpers/dom/documentFragmentToHTML";
 
 export type MyDraftMessage = DraftMessage.draftMessage;
 
@@ -30,23 +33,23 @@ export class AppDraftsManager {
   private getAllDraftPromise: Promise<void> = null;
 
   constructor() {
-    sessionStorage.get('drafts').then(drafts => {
+    stateStorage.get('drafts').then(drafts => {
       this.drafts = drafts || {};
     });
 
     rootScope.addMultipleEventsListeners({
       updateDraftMessage: (update) => {
         const peerID = appPeersManager.getPeerId(update.peer);
-        this.saveDraft(peerID, (update as any).threadId, update.draft, {notify: true});
+        this.saveDraft(peerID, update.threadId, update.draft, {notify: true});
       }
     });
   }
 
-  private getKey(peerId: number, threadId?: number) {
+  private getKey(peerId: PeerId, threadId?: number) {
     return '' + peerId + (threadId ? '_' + threadId : '');
   }
 
-  public getDraft(peerId: number, threadId?: number) {
+  public getDraft(peerId: PeerId, threadId?: number) {
     return this.drafts[this.getKey(peerId, threadId)];
   }
 
@@ -57,7 +60,7 @@ export class AppDraftsManager {
           continue;
         }
 
-        const peerId = +key;
+        const peerId = key.toPeerId();
         const dialog = appMessagesManager.getDialogOnly(peerId);
         if(!dialog) {
           appMessagesManager.reloadConversation(peerId);
@@ -72,20 +75,20 @@ export class AppDraftsManager {
   }
 
   public getAllDrafts() {
-    return this.getAllDraftPromise || (this.getAllDraftPromise = new Promise((resolve) => {
-      apiManager.invokeApi('messages.getAllDrafts').then((updates) => {
+    return this.getAllDraftPromise || (
+      this.getAllDraftPromise = apiManager.invokeApi('messages.getAllDrafts')
+      .then((updates) => {
         const p = apiUpdatesManager.updatesState.syncLoading || Promise.resolve();
         p.then(() => {
           apiUpdatesManager.processUpdateMessage(updates);
         });
-        
-        resolve();
-      });
-    }));
+      })
+    );
   }
 
-  public saveDraft(peerId: number, threadId: number, apiDraft: DraftMessage, options: Partial<{
-    notify: boolean
+  public saveDraft(peerId: PeerId, threadId: number, apiDraft: DraftMessage, options: Partial<{
+    notify: boolean,
+    force: boolean
   }> = {}) {
     const draft = this.processApiDraft(apiDraft);
 
@@ -96,16 +99,17 @@ export class AppDraftsManager {
       delete this.drafts[key];
     }
 
-    sessionStorage.set({
+    stateStorage.set({
       drafts: this.drafts
     });
 
     if(options.notify) {
       // console.warn(dT(), 'save draft', peerId, apiDraft, options)
-      rootScope.broadcast('draft_updated', {
+      rootScope.dispatchEvent('draft_updated', {
         peerId,
         threadId,
-        draft
+        draft,
+        force: options.force
       });
     }
 
@@ -171,16 +175,16 @@ export class AppDraftsManager {
     const apiEntities = draft.entities || [];
     const totalEntities = RichTextProcessor.mergeEntities(apiEntities.slice(), myEntities); // ! only in this order, otherwise bold and emoji formatting won't work
 
-    draft.rMessage = RichTextProcessor.wrapDraftText(draft.message, {entities: totalEntities});
+    draft.rMessage = documentFragmentToHTML(RichTextProcessor.wrapDraftText(draft.message, {entities: totalEntities}));
     //draft.rReply = appMessagesManager.getRichReplyText(draft);
     if(draft.reply_to_msg_id) {
-      draft.reply_to_msg_id = appMessagesManager.generateMessageId(draft.reply_to_msg_id);
+      draft.reply_to_msg_id = appMessagesIdsManager.generateMessageId(draft.reply_to_msg_id);
     }
 
     return draft;
   }
 
-  public async syncDraft(peerId: number, threadId: number, localDraft?: MyDraftMessage, saveOnServer = true) {
+  public async syncDraft(peerId: PeerId, threadId: number, localDraft?: DraftMessage, saveOnServer = true, force = false) {
     // console.warn(dT(), 'sync draft', peerID)
     const serverDraft = this.getDraft(peerId, threadId);
     if(this.draftsAreEqual(serverDraft, localDraft)) {
@@ -198,15 +202,16 @@ export class AppDraftsManager {
     if(this.isEmptyDraft(localDraft)) {
       draftObj = {_: 'draftMessageEmpty'};
     } else {
+      assumeType<DraftMessage.draftMessage>(localDraft);
       let message = localDraft.message;
       let entities: MessageEntity[] = localDraft.entities;
 
       if(localDraft.reply_to_msg_id) {
-        params.reply_to_msg_id = appMessagesManager.getServerMessageId(localDraft.reply_to_msg_id);
+        params.reply_to_msg_id = appMessagesIdsManager.getServerMessageId(localDraft.reply_to_msg_id);
       }
 
       if(entities?.length) {
-        params.entities = entities;
+        params.entities = appMessagesManager.getInputEntities(entities);
       }
 
       if(localDraft.pFlags.no_webpage) {
@@ -219,13 +224,58 @@ export class AppDraftsManager {
     const saveLocalDraft = draftObj || localDraft;
     saveLocalDraft.date = tsNow(true) + serverTimeManager.serverTimeOffset;
 
-    this.saveDraft(peerId, threadId, saveLocalDraft, {notify: true});
+    this.saveDraft(peerId, threadId, saveLocalDraft, {notify: true, force});
 
     if(saveOnServer && !threadId) {
       return apiManager.invokeApi('messages.saveDraft', params);
     }
 
     return true;
+  }
+
+  public clearAllDrafts() {
+    return apiManager.invokeApi('messages.clearAllDrafts').then(bool => {
+      if(!bool) {
+        return;
+      }
+
+      for(const combined in this.drafts) {
+        const [peerId, threadId] = combined.split('_');
+        rootScope.dispatchEvent('draft_updated', {
+          peerId: peerId.toPeerId(),
+          threadId: threadId ? +threadId : undefined,
+          draft: undefined
+        });
+      }
+    });
+  }
+
+  public clearDraft(peerId: PeerId, threadId: number) {
+    const emptyDraft: DraftMessage.draftMessageEmpty = {
+      _: 'draftMessageEmpty'
+    };
+
+    if(threadId) {
+      this.syncDraft(peerId, threadId, emptyDraft as any, false, true);
+    } else {
+      this.saveDraft(peerId, threadId, emptyDraft, {notify: true, force: true});  
+    }
+  }
+
+  public setDraft(peerId: PeerId, threadId: number, message: string, entities?: MessageEntity[]) {
+    const draft: DraftMessage.draftMessage = {
+      _: 'draftMessage',
+      date: Date.now() / 1000 | 0,
+      message,
+      pFlags: {},
+      entities
+    };
+
+    if(threadId) {
+      this.syncDraft(peerId, threadId, draft, false, true);
+    } else {
+      this.saveDraft(peerId, threadId, draft, {notify: true, force: true});  
+    }
   }
 }
 

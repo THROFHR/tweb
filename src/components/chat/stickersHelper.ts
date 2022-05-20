@@ -5,10 +5,10 @@
  */
 
 import mediaSizes from "../../helpers/mediaSizes";
-import { clamp } from "../../helpers/number";
 import { MyDocument } from "../../lib/appManagers/appDocsManager";
 import { CHAT_ANIMATION_GROUP } from "../../lib/appManagers/appImManager";
 import appStickersManager from "../../lib/appManagers/appStickersManager";
+import rootScope from "../../lib/rootScope";
 import { EmoticonsDropdown } from "../emoticonsDropdown";
 import { SuperStickerRenderer } from "../emoticonsDropdown/tabs/stickers";
 import LazyLoadQueue from "../lazyLoadQueue";
@@ -28,9 +28,9 @@ export default class StickersHelper extends AutocompleteHelper {
       controller,
       listType: 'xy', 
       onSelect: (target) => {
-        EmoticonsDropdown.onMediaClick({target}, true);
+        return !EmoticonsDropdown.onMediaClick({target}, true);
       }, 
-      waitForKey: 'ArrowUp'
+      waitForKey: ['ArrowUp', 'ArrowDown']
     });
 
     this.container.classList.add('stickers-helper');
@@ -39,6 +39,8 @@ export default class StickersHelper extends AutocompleteHelper {
       setTimeout(() => { // it is not rendered yet
         this.scrollable.container.scrollTop = 0;
       }, 0);
+
+      rootScope.dispatchEvent('choosing_sticker', true);
     });
 
     this.addEventListener('hidden', () => {
@@ -46,6 +48,8 @@ export default class StickersHelper extends AutocompleteHelper {
         mediaSizes.removeEventListener('changeScreen', this.onChangeScreen);
         this.onChangeScreen = undefined;
       }
+
+      rootScope.dispatchEvent('choosing_sticker', false);
     });
   }
 
@@ -56,6 +60,7 @@ export default class StickersHelper extends AutocompleteHelper {
       this.lazyLoadQueue.clear();
     }
 
+    appStickersManager.preloadAnimatedEmojiSticker(emoticon);
     appStickersManager.getStickersByEmoticon(emoticon)
     .then((stickers) => {
       if(!middleware()) {
@@ -79,7 +84,7 @@ export default class StickersHelper extends AutocompleteHelper {
             container.append(this.superStickerRenderer.renderSticker(sticker as MyDocument, undefined, promises));
           });
 
-          (Promise.all(promises) as Promise<any>).then(resolve, resolve);
+          (Promise.all(promises) as Promise<any>).finally(resolve);
         });
       } else {
         ready = Promise.resolve();
@@ -91,7 +96,8 @@ export default class StickersHelper extends AutocompleteHelper {
 
         if(!this.onChangeScreen) {
           this.onChangeScreen = () => {
-            this.list.style.width = this.list.childElementCount * mediaSizes.active.esgSticker.width + 'px';
+            const width = (this.list.childElementCount * mediaSizes.active.esgSticker.width) + (this.list.childElementCount - 1 * 1);
+            this.list.style.width = width + 'px';
           };
           mediaSizes.addEventListener('changeScreen', this.onChangeScreen);
         }

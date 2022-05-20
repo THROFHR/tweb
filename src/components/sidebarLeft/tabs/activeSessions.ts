@@ -9,7 +9,7 @@ import { SettingSection } from "..";
 import Button from "../../button";
 import Row from "../../row";
 import { Authorization } from "../../../layer";
-import { formatDateAccordingToToday } from "../../../helpers/date";
+import { formatDateAccordingToTodayNew } from "../../../helpers/date";
 import { attachContextMenuListener, openBtnMenu, positionMenu } from "../../misc";
 import ButtonMenu from "../../buttonMenu";
 import apiManager from "../../../lib/mtproto/mtprotoworker";
@@ -20,13 +20,15 @@ import PopupPeer from "../../popups/peer";
 import findUpClassName from "../../../helpers/dom/findUpClassName";
 import { attachClickEvent } from "../../../helpers/dom/clickEvent";
 import toggleDisability from "../../../helpers/dom/toggleDisability";
+import { SliderSuperTabEventable } from "../../sliderTab";
+import findAndSplice from "../../../helpers/array/findAndSplice";
 
-export default class AppActiveSessionsTab extends SliderSuperTab {
-  public privacyTab: AppPrivacyAndSecurityTab;
+export default class AppActiveSessionsTab extends SliderSuperTabEventable {
   public authorizations: Authorization.authorization[];
   private menuElement: HTMLElement;
   
   protected init() {
+    this.header.classList.add('with-border');
     this.container.classList.add('active-sessions-container');
     this.setTitle('SessionsTitle');
 
@@ -35,14 +37,14 @@ export default class AppActiveSessionsTab extends SliderSuperTab {
         title: [auth.app_name, auth.app_version].join(' '),
         subtitle: [auth.ip, auth.country].join(' - '),
         clickable: true,
-        titleRight: auth.pFlags.current ? undefined : formatDateAccordingToToday(new Date(Math.max(auth.date_active, auth.date_created) * 1000))
+        titleRight: auth.pFlags.current ? undefined : formatDateAccordingToTodayNew(new Date(Math.max(auth.date_active, auth.date_created) * 1000))
       });
 
-      row.container.dataset.hash = auth.hash;
+      row.container.dataset.hash = '' + auth.hash;
 
       const midtitle = document.createElement('div');
       midtitle.classList.add('row-midtitle');
-      midtitle.innerHTML = [auth.device_model, auth.system_version].join(', ');
+      midtitle.innerHTML = [auth.device_model, auth.system_version || auth.platform].filter(Boolean).join(', ');
 
       row.subtitle.parentElement.insertBefore(midtitle, row.subtitle);
 
@@ -53,10 +55,11 @@ export default class AppActiveSessionsTab extends SliderSuperTab {
 
     {
       const section = new SettingSection({
-        name: 'CurrentSession'
+        name: 'CurrentSession',
+        caption: 'ClearOtherSessionsHelp'
       });
 
-      const auth = authorizations.findAndSplice(auth => auth.pFlags.current);
+      const auth = findAndSplice(authorizations, auth => auth.pFlags.current);
       const session = Session(auth);
 
       section.content.append(session.container);
@@ -74,7 +77,6 @@ export default class AppActiveSessionsTab extends SliderSuperTab {
                   //toggleDisability([btnTerminate], false);
                   btnTerminate.remove();
                   otherSection.container.remove();
-                  this.privacyTab.updateActiveSessions();
                 }, onError).finally(() => {
                   toggle();
                 });
@@ -96,7 +98,8 @@ export default class AppActiveSessionsTab extends SliderSuperTab {
     }
 
     const otherSection = new SettingSection({
-      name: 'OtherSessions'
+      name: 'OtherSessions',
+      caption: 'SessionsListInfo'
     });
 
     authorizations.forEach(auth => {
@@ -124,7 +127,6 @@ export default class AppActiveSessionsTab extends SliderSuperTab {
             .then(value => {
               if(value) {
                 target.remove();
-                this.privacyTab.updateActiveSessions();
               }
             }, onError);
           }

@@ -4,6 +4,7 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import replaceContent from "../helpers/dom/replaceContent";
 import { randomLong } from "../helpers/random";
 import { InputPrivacyKey, InputPrivacyRule } from "../layer";
 import appPrivacyManager, { PrivacyType } from "../lib/appManagers/appPrivacyManager";
@@ -16,7 +17,7 @@ import { SettingSection, generateSection } from "./sidebarLeft";
 import AppAddMembersTab from "./sidebarLeft/tabs/addMembers";
 import { SliderSuperTabEventable } from "./sliderTab";
 
-type PrivacySectionStr = LangPackKey | '';
+export type PrivacySectionStr = LangPackKey | '' | HTMLElement;
 export default class PrivacySection {
   public radioRows: Map<PrivacyType, Row>;
   public radioSection: SettingSection;
@@ -29,8 +30,8 @@ export default class PrivacySection {
     clickable: true
   }>;
   public peerIds: {
-    disallow?: number[],
-    allow?: number[]
+    disallow?: PeerId[],
+    allow?: PeerId[]
   };
   public type: PrivacyType;
 
@@ -149,11 +150,11 @@ export default class PrivacySection {
 
       if(this.exceptions) {
         this.peerIds = {};
-        (['allow', 'disallow'] as ('allow' | 'disallow')[]).forEach(k => {
+        ['allow' as const, 'disallow' as const].forEach(k => {
           const arr = [];
           const from = k === 'allow' ? details.allowPeers : details.disallowPeers;
-          arr.push(...from.users);
-          arr.push(...from.chats.map(id => -id));
+          arr.push(...from.users.map(id => id.toPeerId()));
+          arr.push(...from.chats.map(id => id.toPeerId(true)));
           this.peerIds[k] = arr;
           const s = this.exceptions.get(k).row.subtitle;
           s.innerHTML = '';
@@ -189,12 +190,11 @@ export default class PrivacySection {
               return;
             }
 
-            const _peerIds: number[] = this.peerIds[k];
-            
+            const _peerIds = this.peerIds[k];
             if(_peerIds) {
               const splitted = this.splitPeersByType(_peerIds);
               if(splitted.chats.length) {
-                rules.push({_: chatKey, chats: splitted.chats.map(peerId => -peerId)});
+                rules.push({_: chatKey, chats: splitted.chats});
               }
   
               if(splitted.users.length) {
@@ -205,7 +205,7 @@ export default class PrivacySection {
         }
         
         appPrivacyManager.setPrivacy(options.inputKey, rules);
-      }, true);
+      }, {once: true});
     });
   }
 
@@ -217,6 +217,8 @@ export default class PrivacySection {
     const captionElement = this.radioSection.caption;
     if(!caption) {
       captionElement.innerHTML = '';
+    } else if(caption instanceof HTMLElement) {
+      replaceContent(captionElement, caption);
     } else {
       _i18n(captionElement, caption);
     }
@@ -236,16 +238,16 @@ export default class PrivacySection {
     row.radioField.input.checked = true;
   }
   
-  private splitPeersByType(peerIds: number[]) {
-    const peers = {users: [] as number[], chats: [] as number[]};
+  private splitPeersByType(peerIds: PeerId[]) {
+    const peers = {users: [] as UserId[], chats: [] as ChatId[]};
     peerIds.forEach(peerId => {
-      peers[peerId < 0 ? 'chats' : 'users'].push(peerId < 0 ? -peerId : peerId);
+      peers[peerId.isAnyChat() ? 'chats' : 'users'].push(peerId.isAnyChat() ? peerId.toChatId() : peerId);
     });
 
     return peers;
   }
 
-  private generateStr(peers: {users: number[], chats: number[]}): HTMLElement[] {
+  private generateStr(peers: {users: UserId[], chats: ChatId[]}) {
     if(!peers.users.length && !peers.chats.length) {
       return [i18n('PrivacySettingsController.AddUsers')];
     }

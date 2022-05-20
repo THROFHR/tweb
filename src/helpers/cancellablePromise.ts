@@ -4,8 +4,10 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import noop from "./noop";
+
 export interface CancellablePromise<T> extends Promise<T> {
-  resolve?: (...args: any[]) => void,
+  resolve?: (value: T) => void,
   reject?: (...args: any[]) => void,
   cancel?: () => void,
 
@@ -19,7 +21,7 @@ export interface CancellablePromise<T> extends Promise<T> {
   isRejected?: boolean
 }
 
-export function deferredPromise<T>() {
+export default function deferredPromise<T>() {
   let deferredHelper: any = {
     isFulfilled: false, 
     isRejected: false,
@@ -30,7 +32,6 @@ export function deferredPromise<T>() {
       deferredHelper.listeners.forEach((callback: any) => callback(...args));
     }, 
 
-    lastNotify: undefined,
     listeners: [],
     addNotifyListener: (callback: (...args: any[]) => void) => {
       if(deferredHelper.lastNotify) {
@@ -43,14 +44,14 @@ export function deferredPromise<T>() {
 
   let deferred: CancellablePromise<T> = new Promise<T>((resolve, reject) => {
     deferredHelper.resolve = (value: T) => {
-      if(deferred.isFulfilled) return;
+      if(deferred.isFulfilled || deferred.isRejected) return;
 
       deferred.isFulfilled = true;
       resolve(value);
     };
     
     deferredHelper.reject = (...args: any[]) => {
-      if(deferred.isRejected) return;
+      if(deferred.isRejected || deferred.isFulfilled) return;
       
       deferred.isRejected = true;
       reject(...args);
@@ -63,10 +64,9 @@ export function deferredPromise<T>() {
     
   }; */
 
-  deferred.finally(() => {
-    deferred.notify = null;
+  deferred.catch(noop).finally(() => {
+    deferred.notify = deferred.notifyAll = deferred.lastNotify = null;
     deferred.listeners.length = 0;
-    deferred.lastNotify = null;
 
     if(deferred.cancel) {
       deferred.cancel = () => {};

@@ -1,3 +1,4 @@
+// @ts-check
 /*
  * https://github.com/morethanwords/tweb
  * Copyright (C) 2019-2021 Eduard Kuzmenko
@@ -7,7 +8,8 @@
 let emoji = require('./in/emoji_pretty.json');
 //let countries = require('./countries_pretty.json');
 
-let countries = require('fs').readFileSync('./in/countries.dat').toString();
+// let countries = require('fs').readFileSync('./in/countries.dat').toString();
+let countries = require('./in/countries.mtproto.json');
 //console.log(countries);
 
 //console.log(emoji, countries);
@@ -146,8 +148,9 @@ if(false) {
     obj[emoji] = e.sort_order !== undefined ? +('' + c + sort_order) : 0;
   });
 
+  const migrateFromVersion = 13.1;
   if(true) formatted.forEach(e => {
-    let {unified, name, short_names, category, sheet_x, sheet_y, sort_order} = e;
+    let {unified, name, short_names, category, sheet_x, sheet_y, sort_order, added_in} = e;
 
     let emoji = unified.split('-')
     .reduce((prev, curr) => prev + String.fromCodePoint(parseInt(curr, 16)), '');
@@ -155,11 +158,18 @@ if(false) {
     emoji = encodeEmoji(emoji);
     emoji = emoji.replace(/-?fe0f/g, '');
     //emoji = emoji.replace(/-?fe0f$/, '');
+
+    let _obj = obj;
+    if(migrateFromVersion) {
+      const version = +added_in;
+      const key = migrateFromVersion >= version ? '' : version;
+      _obj = obj[key] ?? (obj[key] = {});
+    }
     
     let c = categories[category] === undefined ? 9 : categories[category];
     //obj[emoji] = '' + c + sort_order;
     //obj[emoji] = +('' + (c * 1000 + sort_order)).replace(/0+/g, '0').replace(/^(\d)0(\d)/g, '$1$2');
-    obj[emoji] = e.sort_order !== undefined ? +('' + c + sort_order) : 0;
+    _obj[emoji] = e.sort_order !== undefined ? +('' + c + sort_order) : 0;
   });
 
   console.log(obj);
@@ -188,31 +198,49 @@ if(false) {
   require('fs').writeFileSync('./emoji.json', JSON.stringify(obj));
 } */
 
-{
-  let arr = [];
-  /* countries.forEach(e => {
-    let {name, code, phoneCode} = e;
+// old countries format
+// {
+//   let arr = [];
+//   /* countries.forEach(e => {
+//     let {name, code, phoneCode} = e;
     
-    arr.push([name, code, phoneCode]);
-  }); */
+//     arr.push([name, code, phoneCode]);
+//   }); */
   
-  const lines = countries.split('\n');
-  const data2 = [];
-  lines.forEach(x => {
-    if(!x.trim()) return;
-    const split = x.split(';');
-    const item = {
-      phoneCode: split[0],
-      code: split[1],
-      name: split[2],
-      pattern: split[3],
-      //count: Number(split[4]),
-      emoji: split[5]
-    };
+//   const lines = countries.split('\n');
+//   const data2 = [];
+//   lines.forEach(x => {
+//     if(!x.trim()) return;
+//     const split = x.split(';');
+//     const item = {
+//       phoneCode: split[0],
+//       code: split[1],
+//       name: split[2],
+//       pattern: split[3],
+//       //count: Number(split[4]),
+//       emoji: split[5]
+//     };
 
-    arr.push(item);
-    //console.log(item);
-  });
+//     arr.push(item);
+//     //console.log(item);
+//   });
   
-  require('fs').writeFileSync(writePathTo + 'countries.json', JSON.stringify(arr));
+//   require('fs').writeFileSync(writePathTo + 'countries.json', JSON.stringify(arr));
+// }
+
+{
+  const c = countries.filter(country => !country.pFlags.hidden);
+  c.forEach(country => {
+    delete country._;
+    delete country.pFlags;
+    delete country.flags;
+
+    country.country_codes.forEach(countryCode => {
+      delete countryCode._;
+      delete countryCode.pFlags;
+      delete countryCode.flags;
+    });
+  });
+
+  require('fs').writeFileSync(writePathTo + 'countries.json', JSON.stringify(c));
 }

@@ -9,9 +9,10 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import Database from '../config/database';
-import { blobConstruct } from '../helpers/blob';
-import { safeAssign } from '../helpers/object';
+import { Database } from '../config/databases';
+import Modes from '../config/modes';
+import blobConstruct from '../helpers/blob/blobConstruct';
+import safeAssign from '../helpers/object/safeAssign';
 import { logger } from './logger';
 
 /**
@@ -37,22 +38,27 @@ export type IDBOptions = {
 
 const DEBUG = false;
 
-export default class IDBStorage {
-  private static STORAGES: IDBStorage[] = [];
+export default class IDBStorage<T extends Database<any>> {
+  private static STORAGES: IDBStorage<Database<any>>[] = [];
   private openDbPromise: Promise<IDBDatabase>;
   private db: IDBDatabase;
   private storageIsAvailable = true;
 
   private log: ReturnType<typeof logger>;
   
-  private name: string = Database.name;
-  private version: number = Database.version;
-  private stores: IDBStore[] = Database.stores;
+  private name: string;
+  private version: number;
+  private stores: IDBStore[];
+  private storeName: T['stores'][0]['name'];
 
-  private storeName: string;
+  constructor(db: T, storeName: typeof db['stores'][0]['name']) {
+    safeAssign(this, db);
 
-  constructor(options: IDBOptions) {
-    safeAssign(this, options);
+    if(Modes.test) {
+      this.name += '_test';
+    }
+
+    this.storeName = storeName;
 
     this.log = logger('IDB-' + this.storeName);
 
@@ -61,8 +67,12 @@ export default class IDBStorage {
     IDBStorage.STORAGES.push(this);
   }
 
-  public static closeDatabases() {
+  public static closeDatabases(preserve?: IDBStorage<Database<any>>) {
     this.STORAGES.forEach(storage => {
+      if(preserve && preserve === storage) {
+        return;
+      }
+
       const db = storage.db;
       if(db) {
         db.onclose = () => {};
@@ -71,21 +81,39 @@ export default class IDBStorage {
     });
   }
 
-  public static deleteDatabase() {
+  /**
+   * ! WARNING ! function requires at least one opened connection
+   */
+  /* public static clearObjectStores() {
+    const storage = this.STORAGES[0];
+    this.closeDatabases(storage);
+
+    const names = Array.from(storage.db.objectStoreNames);
+    const promises = names.map(name => storage.clear(name));
+    return Promise.all(promises);
+  } */
+
+  /* public static deleteDatabase() {
     this.closeDatabases();
 
-    return new Promise<void>((resolve, reject) => {
-      const deleteRequest = indexedDB.deleteDatabase(Database.name);
-
-      deleteRequest.onerror = () => {
-        reject();
-      };
-
-      deleteRequest.onsuccess = () => {
-        resolve();
-      };
+    const storages = this.STORAGES;
+    const dbNames = Array.from(new Set(storages.map(storage => storage.name)));
+    const promises = dbNames.map(dbName => {
+      return new Promise<void>((resolve, reject) => {
+        const deleteRequest = indexedDB.deleteDatabase(dbName);
+  
+        deleteRequest.onerror = () => {
+          reject();
+        };
+  
+        deleteRequest.onsuccess = () => {
+          resolve();
+        };
+      });
     });
-  }
+
+    return Promise.all(promises);
+  } */
 
   public isAvailable() {
     return this.storageIsAvailable;
@@ -113,7 +141,7 @@ export default class IDBStorage {
         return Promise.reject();
       }
     } catch(error) {
-      this.log.error('error opening db', error.message)
+      this.log.error('error opening db', (error as Error).message);
       this.storageIsAvailable = false;
       return Promise.reject(error);
     }
@@ -203,8 +231,8 @@ export default class IDBStorage {
     }, DEBUG ? 'delete: ' + entryName.join(', ') : '');
   }
 
-  public deleteAll() {
-    return this.getObjectStore('readwrite', (objectStore) => objectStore.clear(), DEBUG ? 'deleteAll' : '');
+  public clear(storeName?: IDBStorage<T>['storeName']) {
+    return this.getObjectStore('readwrite', (objectStore) => objectStore.clear(), DEBUG ? 'clear' : '', storeName);
   }
 
   public save(entryName: string | string[], value: any | any[]) {
@@ -232,7 +260,7 @@ export default class IDBStorage {
   public saveFile(fileName: string, blob: Blob | Uint8Array) {
     //return Promise.resolve(blobConstruct([blob]));
     if(!(blob instanceof Blob)) {
-      blob = blobConstruct([blob]) as Blob;
+      blob = blobConstruct(blob);
     }
 
     return this.save(fileName, blob);
@@ -316,7 +344,7 @@ export default class IDBStorage {
     }, DEBUG ? 'get: ' + entryName.join(', ') : '');
   }
 
-  private getObjectStore<T>(mode: IDBTransactionMode, objectStore: (objectStore: IDBObjectStore) => IDBRequest | IDBRequest[], log?: string) {
+  private getObjectStore<T>(mode: IDBTransactionMode, objectStore: (objectStore: IDBObjectStore) => IDBRequest | IDBRequest[], log?: string, storeName = this.storeName) {
     let perf: number;
 
     if(log) {
@@ -326,7 +354,11 @@ export default class IDBStorage {
 
     return this.openDatabase().then((db) => {
       return new Promise<T>((resolve, reject) => {
-        const transaction = db.transaction([this.storeName], mode);
+        /* if(mode === 'readwrite') {
+          return;
+        } */
+
+        const transaction = db.transaction([storeName], mode);
 
         transaction.onerror = (e) => {
           clearTimeout(timeout);
@@ -353,7 +385,7 @@ export default class IDBStorage {
           this.log.error('IndexedDB: transaction abort!', transaction.error);
         }); */
   
-        const requests = objectStore(transaction.objectStore(this.storeName));
+        const requests = objectStore(transaction.objectStore(storeName));
 
         const isArray = Array.isArray(requests);
         const r: IDBRequest[] = isArray ? requests : [].concat(requests) as any;

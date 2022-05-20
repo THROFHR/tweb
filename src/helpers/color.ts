@@ -12,6 +12,7 @@ export type ColorHsla = {
 };
 
 export type ColorRgba = [number, number, number, number];
+export type ColorRgb = [number, number, number];
 
 /**
  * @returns h [0, 360], s [0, 100], l [0, 100], a [0, 1]
@@ -103,7 +104,11 @@ export function hslaStringToRgba(hsla: string) {
 
 export function hexaToRgba(hexa: string) {
   const arr: ColorRgba = [] as any;
-  const offset = 1;
+  const offset = hexa[0] === '#' ? 1 : 0;
+  if(hexa.length === (5 + offset)) {
+    hexa = (offset ? '#' : '') + '0' + hexa.slice(offset);
+  }
+
   if(hexa.length === (3 + offset)) {
     for(let i = offset; i < hexa.length; ++i) {
       arr.push(parseInt(hexa[i] + hexa[i], 16));
@@ -123,12 +128,16 @@ export function hexaToRgba(hexa: string) {
   return arr;
 }
 
+export function hexToRgb(hex: string) {
+  return hexaToRgba(hex.slice(0, 7)) as any as ColorRgb;
+}
+
 export function hexaToHsla(hexa: string) {
   const rgba = hexaToRgba(hexa);
   return rgbaToHsla(rgba[0], rgba[1], rgba[2], rgba[3]);
 }
 
-export function rgbaToHexa(rgba: ColorRgba) {
+export function rgbaToHexa(rgba: ColorRgba | ColorRgb) {
   return '#' + rgba.map(v => ('0' + v.toString(16)).slice(-2)).join('');
 }
 

@@ -26,10 +26,11 @@
 
 .menu-horizontal-div {
   --size: var(--scrollable-size, 3.5rem);
+  --padding-horizontal: 0px;
   width: 100%;
+  height: var(--size);
   display: flex;
   justify-content: space-around;
-  align-items: center;
   flex-direction: row;
   position: relative;
   z-index: 2;
@@ -38,14 +39,27 @@
   color: var(--secondary-text-color);
   border-bottom: 1px solid var(--border-color);
 
+  &:not(.no-stripe) {
+    &:before,
+    &:after {
+      content: " ";
+      width: var(--padding-horizontal);
+      flex: 0 0 auto;
+    }
+
+    .menu-horizontal-div-item {
+      border-radius: $border-radius-medium;
+    }
+  }
+
   &-item {
-    height: var(--size);
+    height: 100%;
     padding: 0 1rem;
     cursor: pointer;
     text-align: center;
     flex: 1 1 auto;
     font-size: 1rem;
-    font-weight: 500;
+    font-weight: var(--font-weight-bold);
     position: relative;
     transition: none !important;
     display: flex;
@@ -79,12 +93,13 @@
       display: inline-flex;
       align-items: center;
       overflow: visible;
+      pointer-events: none;
     }
   }
 
   i {
     position: absolute;
-    bottom: calc(-.625rem - 7px);
+    bottom: calc(-.6875rem - 6px);
     left: 0;
     opacity: 0;
     background-color: var(--primary-color);
@@ -120,7 +135,7 @@
   //   transition: .3s transform;
   // }
   
-  > div {
+  .tabs-tab {
     // * can't define these rules because of old firefox, though they don't work
     //height: 100%;
     //max-height: 100%;
@@ -129,11 +144,9 @@
     
     display: none;
     flex-direction: column;
-    position: relative;
     grid-row-start: 1;
     grid-column-start: 1;
     background-color: var(--background-color);
-    //z-index: 1;
 
     body.animation-level-0 & {
       transition: none !important;
@@ -147,12 +160,12 @@
       display: flex;
     }
     
-    > div:not(.scroll-padding) {
+    /* > div:not(.scroll-padding) {
       width: 100%;
       max-width: 100%;
       //overflow: hidden;
       position: relative;
-    }
+    } */
   }
 
   /* &[data-animation="tabs"] {
@@ -183,12 +196,30 @@
     }
   } */
   
-  &[data-animation="tabs"] > div {
+  &[data-animation="tabs"] .tabs-tab {
     transition: transform var(--tabs-transition);
   }
 
-  &[data-animation="navigation"] > div {
+  /* &[data-animation="navigation"] .tabs-tab {
     transition: transform var(--tabs-transition), filter var(--tabs-transition);
+  } */
+
+  &[data-animation="navigation"] {
+    /* .tabs-tab {
+      transition: transform var(--tabs-transition), filter var(--tabs-transition);
+    } */
+
+    &.animating {
+      .tabs-tab {
+        transition: transform var(--transition-standard-in), filter var(--transition-standard-in);
+      }
+
+      &.backwards {
+        .tabs-tab {
+          transition: transform var(--transition-standard-out), filter var(--transition-standard-out);
+        }
+      }
+    }
   }
 }
 

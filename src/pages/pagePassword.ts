@@ -10,14 +10,13 @@ import { AccountPassword } from '../layer';
 import appStateManager from '../lib/appManagers/appStateManager';
 import passwordManager from '../lib/mtproto/passwordManager';
 import Page from './page';
-import pageIm from './pageIm';
 import Button from '../components/button';
 import PasswordInputField from '../components/passwordInputField';
 import PasswordMonkey from '../components/monkeys/password';
 import RichTextProcessor from '../lib/richtextprocessor';
 import I18n from '../lib/langPack';
 import LoginPage from './loginPage';
-import { cancelEvent } from '../helpers/dom/cancelEvent';
+import cancelEvent from '../helpers/dom/cancelEvent';
 import { attachClickEvent } from '../helpers/dom/clickEvent';
 import htmlToSpan from '../helpers/dom/htmlToSpan';
 import replaceContent from '../helpers/dom/replaceContent';
@@ -85,13 +84,18 @@ let onFirstMount = (): Promise<any> => {
     btnNextI18n.update({key: 'PleaseWait'});
     const preloader = putPreloader(btnNext);
 
+    passwordInputField.setValueSilently('' + Math.random()); // prevent saving suggestion
+    passwordInputField.setValueSilently(value); // prevent saving suggestion
+
     passwordManager.check(value, state).then((response) => {
       //console.log('passwordManager response:', response);
         
       switch(response._) {
         case 'auth.authorization':
           clearInterval(getStateInterval);
-          pageIm.mount();
+          import('./pageIm').then(m => {
+            m.default.mount();
+          });
           if(monkey) monkey.remove();
           break;
         default:

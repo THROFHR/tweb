@@ -6,16 +6,19 @@
 
 import CheckboxField from "./checkboxField";
 import RadioField from "./radioField";
-import { ripple } from "./ripple";
+import ripple from "./ripple";
 import { SliderSuperTab } from "./slider";
 import RadioForm from "./radioForm";
 import { i18n, LangPackKey } from "../lib/langPack";
 import replaceContent from "../helpers/dom/replaceContent";
+import setInnerHTML from "../helpers/dom/setInnerHTML";
 
 export default class Row {
   public container: HTMLElement;
   public title: HTMLDivElement;
+  public titleRight: HTMLElement;
   public subtitle: HTMLElement;
+  public media: HTMLElement;
 
   public checkboxField: CheckboxField;
   public radioField: RadioField;
@@ -24,16 +27,20 @@ export default class Row {
 
   constructor(options: Partial<{
     icon: string,
-    subtitle: string,
-    subtitleLangKey: LangPackKey
+    subtitle: string | HTMLElement | DocumentFragment,
+    subtitleLangKey: LangPackKey,
+    subtitleLangArgs: any[],
     radioField: Row['radioField'],
     checkboxField: Row['checkboxField'],
     noCheckboxSubtitle: boolean,
-    title: string,
+    title: string | HTMLElement | DocumentFragment,
     titleLangKey: LangPackKey,
     titleRight: string | HTMLElement,
+    titleRightSecondary: string | HTMLElement,
     clickable: boolean | ((e: Event) => void),
-    navigationTab: SliderSuperTab
+    navigationTab: SliderSuperTab,
+    havePadding: boolean,
+    noRipple: boolean
   }> = {}) {
     this.container = document.createElement(options.radioField || options.checkboxField ? 'label' : 'div');
     this.container.classList.add('row');
@@ -42,18 +49,22 @@ export default class Row {
     this.subtitle.classList.add('row-subtitle');
     this.subtitle.setAttribute('dir', 'auto');
     if(options.subtitle) {
-      this.subtitle.innerHTML = options.subtitle;
+      if(typeof(options.subtitle) === 'string') {
+        setInnerHTML(this.subtitle, options.subtitle);
+      } else {
+        this.subtitle.append(options.subtitle);
+      }
     } else if(options.subtitleLangKey) {
-      this.subtitle.append(i18n(options.subtitleLangKey));
+      this.subtitle.append(i18n(options.subtitleLangKey, options.subtitleLangArgs));
     }
     this.container.append(this.subtitle);
 
-    let havePadding = false;
+    let havePadding = !!options.havePadding;
     if(options.radioField || options.checkboxField) {
-      havePadding = true;
       if(options.radioField) {
         this.radioField = options.radioField;
         this.container.append(this.radioField.label);
+        havePadding = true;
       }
 
       if(options.checkboxField) {
@@ -64,6 +75,7 @@ export default class Row {
           this.container.classList.add('row-with-toggle');
           options.titleRight = this.checkboxField.label;
         } else {
+          havePadding = true;
           this.container.append(this.checkboxField.label);
         }
 
@@ -80,7 +92,8 @@ export default class Row {
     
     if(options.title || options.titleLangKey) {
       let c: HTMLElement;
-      if(options.titleRight) {
+      const titleRight = options.titleRight || options.titleRightSecondary;
+      if(titleRight) {
         c = document.createElement('div');
         c.classList.add('row-title-row');
         this.container.append(c);
@@ -92,23 +105,31 @@ export default class Row {
       this.title.classList.add('row-title');
       this.title.setAttribute('dir', 'auto');
       if(options.title) {
-        this.title.innerHTML = options.title;
+        if(typeof(options.title) === 'string') {
+          this.title.innerHTML = options.title;
+        } else {
+          this.title.append(options.title);
+        }
       } else {
         this.title.append(i18n(options.titleLangKey));
       }
       c.append(this.title);
 
-      if(options.titleRight) {
-        const titleRight = document.createElement('div');
-        titleRight.classList.add('row-title', 'row-title-right');
+      if(titleRight) {
+        const titleRightEl = this.titleRight = document.createElement('div');
+        titleRightEl.classList.add('row-title', 'row-title-right');
 
-        if(typeof(options.titleRight) === 'string') {
-          titleRight.innerHTML = options.titleRight;
-        } else {
-          titleRight.append(options.titleRight);
+        if(options.titleRightSecondary) {
+          titleRightEl.classList.add('row-title-right-secondary');
         }
 
-        c.append(titleRight);
+        if(typeof(titleRight) === 'string') {
+          titleRightEl.innerHTML = titleRight;
+        } else {
+          titleRightEl.append(titleRight);
+        }
+
+        c.append(titleRightEl);
       }
     }
 
@@ -135,7 +156,10 @@ export default class Row {
       }
 
       this.container.classList.add('row-clickable', 'hover-effect');
-      ripple(this.container, undefined, undefined, true);
+
+      if(!options.noRipple) {
+        ripple(this.container, undefined, undefined, true);
+      }
 
       /* if(options.radioField || options.checkboxField) {
         this.container.prepend(this.container.lastElementChild);
@@ -143,7 +167,20 @@ export default class Row {
     }
   }
 
+  public createMedia(size?: 'small') {
+    this.container.classList.add('row-with-padding');
+    
+    const media = this.media = document.createElement('div');
+    media.classList.add('row-media');
 
+    if(size) {
+      media.classList.add('row-media-' + size);
+    }
+
+    this.container.append(media);
+
+    return media;
+  }
 }
 
 export const RadioFormFromRows = (rows: Row[], onChange: (value: string) => void) => {

@@ -4,23 +4,28 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-export default function getVisibleRect(element: HTMLElement, overflowElement: HTMLElement) {
-  const rect = element.getBoundingClientRect();
-  const overflowRect = overflowElement.getBoundingClientRect();
-
-  let {top: overflowTop, bottom: overflowBottom} = overflowRect;
+export default function getVisibleRect(
+  element: HTMLElement, 
+  overflowElement: HTMLElement, 
+  lookForSticky?: boolean, 
+  rect = element.getBoundingClientRect(),
+  overflowRect = overflowElement.getBoundingClientRect()
+) {
+  let {top: overflowTop, right: overflowRight, bottom: overflowBottom, left: overflowLeft} = overflowRect;
 
   // * respect sticky headers
-  const sticky = overflowElement.querySelector('.sticky');
-  if(sticky) {
-    const stickyRect = sticky.getBoundingClientRect();
-    overflowTop = stickyRect.bottom;
+  if(lookForSticky) {
+    const sticky = overflowElement.querySelector('.sticky');
+    if(sticky) {
+      const stickyRect = sticky.getBoundingClientRect();
+      overflowTop = stickyRect.bottom;
+    }
   }
 
   if(rect.top >= overflowBottom
     || rect.bottom <= overflowTop
-    || rect.right <= overflowRect.left
-    || rect.left >= overflowRect.right) {
+    || rect.right <= overflowLeft
+    || rect.left >= overflowRight) {
     return null;
   }
 
@@ -41,10 +46,12 @@ export default function getVisibleRect(element: HTMLElement, overflowElement: HT
   return {
     rect: {
       top: rect.top < overflowTop && overflowTop !== 0 ? (overflow.top = true, ++overflow.vertical, overflowTop) : rect.top,
-      right: 0,
+      right: rect.right > overflowRight && overflowRight !== windowWidth ? (overflow.right = true, ++overflow.horizontal, overflowRight) : rect.right,
       bottom: rect.bottom > overflowBottom && overflowBottom !== windowHeight ? (overflow.bottom = true, ++overflow.vertical, overflowBottom) : rect.bottom,
-      left: 0
+      left: rect.left < overflowLeft && overflowLeft !== 0 ? (overflow.left = true, ++overflow.horizontal, overflowLeft) : rect.left
     },
     overflow
   };
 }
+
+(window as any).getVisibleRect = getVisibleRect;

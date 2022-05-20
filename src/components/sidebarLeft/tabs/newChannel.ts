@@ -4,10 +4,9 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import appSidebarLeft from "..";
+import appSidebarLeft, { SettingSection } from "..";
 import { InputFile } from "../../../layer";
 import appChatsManager from "../../../lib/appManagers/appChatsManager";
-import Button from "../../button";
 import InputField from "../../inputField";
 import { SliderSuperTab } from "../../slider";
 import AvatarEdit from "../../avatarEdit";
@@ -31,16 +30,20 @@ export default class AppNewChannelTab extends SliderSuperTab {
       this.uploadAvatar = _upload;
     });
 
+    const section = new SettingSection({
+      caption: 'Channel.DescriptionHolderDescrpiton'
+    });
+
     const inputWrapper = document.createElement('div');
     inputWrapper.classList.add('input-wrapper');
 
     this.channelNameInputField = new InputField({
-      label: 'Channel.ChannelNameHolder',
+      label: 'EnterChannelName',
       maxLength: 128
     });
 
     this.channelDescriptionInputField = new InputField({
-      label: 'Channel.DescriptionPlaceholder',
+      label: 'DescriptionOptionalPlaceholder',
       maxLength: 255
     });
 
@@ -55,10 +58,6 @@ export default class AppNewChannelTab extends SliderSuperTab {
     this.channelNameInputField.input.addEventListener('input', onLengthChange);
     this.channelDescriptionInputField.input.addEventListener('input', onLengthChange);
 
-    const caption = document.createElement('div');
-    caption.classList.add('caption');
-    _i18n(caption, 'Channel.DescriptionHolderDescrpiton');
-
     this.nextBtn = ButtonCorner({icon: 'arrow_next'});
 
     this.nextBtn.addEventListener('click', () => {
@@ -66,7 +65,11 @@ export default class AppNewChannelTab extends SliderSuperTab {
       const about = this.channelDescriptionInputField.value;
 
       this.nextBtn.disabled = true;
-      appChatsManager.createChannel(title, about).then((channelId) => {
+      appChatsManager.createChannel({
+        title, 
+        about,
+        broadcast: true
+      }).then((channelId) => {
         if(this.uploadAvatar) {
           this.uploadAvatar().then((inputFile) => {
             appChatsManager.editPhoto(channelId, inputFile);
@@ -75,20 +78,20 @@ export default class AppNewChannelTab extends SliderSuperTab {
         
         appSidebarLeft.removeTabFromHistory(this);
         new AppAddMembersTab(this.slider).open({
-          peerId: channelId,
           type: 'channel',
           skippable: true,
           title: 'GroupAddMembers',
           placeholder: 'SendMessageTo',
           takeOut: (peerIds) => {
-            return appChatsManager.inviteToChannel(Math.abs(channelId), peerIds);
+            return appChatsManager.inviteToChannel(channelId, peerIds);
           }
         });
       });
     });
 
     this.content.append(this.nextBtn);
-    this.scrollable.append(this.avatarEdit.container, inputWrapper, caption);
+    section.content.append(this.avatarEdit.container, inputWrapper);
+    this.scrollable.append(section.container);
   }
 
   public onCloseAfterTimeout() {

@@ -4,7 +4,7 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { cancelEvent } from "../../helpers/dom/cancelEvent";
+import cancelEvent from "../../helpers/dom/cancelEvent";
 import ListenerSetter from "../../helpers/listenerSetter";
 import rootScope from "../../lib/rootScope";
 import ButtonMenu, { ButtonMenuItemOptions } from "../buttonMenu";
@@ -57,7 +57,7 @@ export default class SendMenu {
     }, options.listenerSetter);
   }
 
-  public setPeerId(peerId: number) {
+  public setPeerId(peerId: PeerId) {
     this.type = peerId === rootScope.myId ? 'reminder' : 'schedule';
   }
 };

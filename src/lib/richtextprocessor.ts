@@ -9,22 +9,22 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import Config from './config';
-
 import emojiRegExp from '../vendor/emoji/regex';
 import { encodeEmoji, toCodePoints } from '../vendor/emoji';
-import { MessageEntity } from '../layer';
-import { encodeEntities } from '../helpers/string';
-import { isSafari } from '../helpers/userAgent';
+import { Message, MessageEntity } from '../layer';
+import { IS_SAFARI } from '../environment/userAgent';
 import { MOUNT_CLASS_TO } from '../config/debug';
+import IS_EMOJI_SUPPORTED from '../environment/emojiSupport';
+import copy from '../helpers/object/copy';
+import encodeEntities from '../helpers/string/encodeEntities';
+import Emoji, { EmojiVersions } from '../config/emoji';
+import TLD from '../config/tld';
 
 const EmojiHelper = {
   emojiMap: (code: string) => { return code; },
   shortcuts: [] as any,
   emojis: [] as any
 };
-
-const emojiData = Config.Emoji;
 
 const alphaCharsRegExp = 'a-z' +
   '\\u00c0-\\u00d6\\u00d8-\\u00f6\\u00f8-\\u00ff' + // Latin-1
@@ -75,13 +75,13 @@ const urlRegExp = urlProtocolRegExpPart +
   // resource path
   '(?:/(?:\\S{0,255}[^\\s.;,(\\[\\]{}<>"\'])?)?';
 const urlProtocolRegExp = new RegExp('^' + urlProtocolRegExpPart.slice(0, -1), 'i');
-const urlAnyProtocolRegExp = /^((?:.+?):\/\/|mailto:)/;
+const urlAnyProtocolRegExp = /^((?:[^\/]+?):\/\/|mailto:)/;
 const usernameRegExp = '[a-zA-Z\\d_]{5,32}';
 const botCommandRegExp = '\\/([a-zA-Z\\d_]{1,32})(?:@(' + usernameRegExp + '))?(\\b|$)';
 const fullRegExp = new RegExp('(^| )(@)(' + usernameRegExp + ')|(' + urlRegExp + ')|(\\n)|(' + emojiRegExp + ')|(^|[\\s\\(\\]])(#[' + alphaNumericRegExp + ']{2,64})|(^|\\s)' + botCommandRegExp, 'i');
 const emailRegExp = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
 //const markdownTestRegExp = /[`_*@~]/;
-const markdownRegExp = /(^|\s|\n)(````?)([\s\S]+?)(````?)([\s\n\.,:?!;]|$)|(^|\s|\x01)(`|~~|\*\*|__|_-_)([^\n]+?)\7([\x01\s\.,:?!;]|$)|@(\d+)\s*\((.+?)\)|(\[(.+?)\]\((.+?)\))/m;
+const markdownRegExp = /(^|\s|\n)(````?)([\s\S]+?)(````?)([\s\n\.,:?!;]|$)|(^|\s|\x01)(`|~~|\*\*|__|_-_|\|\|)([^\n]+?)\7([\x01\s\.,:?!;]|$)|@(\d+)\s*\((.+?)\)|(\[(.+?)\]\((.+?)\))/m;
 const siteHashtags: {[siteName: string]: string} = {
   Telegram: 'tg://search_hashtag?hashtag={1}',
   Twitter: 'https://twitter.com/hashtag/{1}',
@@ -101,7 +101,8 @@ const markdownEntities: {[markdown: string]: MessageEntity['_']} = {
   '**': 'messageEntityBold',
   '__': 'messageEntityItalic',
   '~~': 'messageEntityStrike',
-  '_-_': 'messageEntityUnderline'
+  '_-_': 'messageEntityUnderline',
+  '||': 'messageEntitySpoiler'
 };
 
 const passConflictingEntities: Set<MessageEntity['_']> = new Set([
@@ -114,9 +115,9 @@ for(let i in markdownEntities) {
 }
 
 namespace RichTextProcessor {
-  export const emojiSupported = navigator.userAgent.search(/OS X|iPhone|iPad|iOS/i) !== -1/*  && false *//*  || true */;
+  export const PHONE_NUMBER_REG_EXP = /^\+\d+$/;
 
-  export function getEmojiSpritesheetCoords(emojiCode: string) {
+  export function getEmojiUnified(emojiCode: string) {
     let unified = encodeEmoji(emojiCode).replace(/-?fe0f/g, '');
   
     /* if(unified === '1f441-200d-1f5e8') {
@@ -124,11 +125,11 @@ namespace RichTextProcessor {
       unified = '1f441-fe0f-200d-1f5e8';
     } */
   
-    if(!emojiData.hasOwnProperty(unified) 
+    if(!Emoji.hasOwnProperty(unified) 
       // && !emojiData.hasOwnProperty(unified.replace(/-?fe0f$/, ''))
     ) {
       //console.error('lol', unified);
-      return null;
+      return;
     }
   
     return unified;
@@ -166,7 +167,7 @@ namespace RichTextProcessor {
           const tld = match[6];
           // let excluded = '';
           if(tld) { // URL
-            if(!protocol && (tld.substr(0, 4) === 'xn--' || Config.TLD.indexOf(tld.toLowerCase()) !== -1)) {
+            if(!protocol && (tld.substr(0, 4) === 'xn--' || TLD.indexOf(tld.toLowerCase()) !== -1)) {
               protocol = 'http://';
             }
   
@@ -199,13 +200,13 @@ namespace RichTextProcessor {
         });
       } else if(match[8]) { // Emoji
         //console.log('hit', match[8]);
-        const emojiCoords = getEmojiSpritesheetCoords(match[8]);
-        if(emojiCoords) {
+        const unified = getEmojiUnified(match[8]);
+        if(unified) {
           entities.push({
             _: 'messageEntityEmoji',
             offset: matchIndex,
             length: match[8].length,
-            unicode: emojiCoords
+            unicode: unified
           });
         }
       } else if(match[11]) { // Hashtag
@@ -217,7 +218,7 @@ namespace RichTextProcessor {
       } else if(match[13]) { // Bot command
         entities.push({
           _: 'messageEntityBotCommand',
-          offset: matchIndex + (match[11] ? match[11].length : 0),
+          offset: matchIndex + (match[11] ? match[11].length : 0) + (match[12] ? match[12].length : 0),
           length: 1 + match[13].length + (match[14] ? 1 + match[14].length : 0),
           unsafe: true
         });
@@ -243,7 +244,7 @@ namespace RichTextProcessor {
     })
   } */
 
-  export function parseMarkdown(text: string, currentEntities: MessageEntity[], noTrim?: boolean): string {
+  export function parseMarkdown(raw: string, currentEntities: MessageEntity[], noTrim?: boolean): string {
     /* if(!markdownTestRegExp.test(text)) {
       return noTrim ? text : text.trim();
     } */
@@ -252,14 +253,12 @@ namespace RichTextProcessor {
     let pushedEntity = false;
     const pushEntity = (entity: MessageEntity) => !findConflictingEntity(currentEntities, entity) ? (entities.push(entity), pushedEntity = true) : pushedEntity = false;
 
-    let raw = text;
-    let match;
-    let newText: any = [];
-    let rawOffset = 0;
+    const newTextParts: string[] = [];
+    let rawOffset = 0, match;
     while(match = raw.match(markdownRegExp)) {
       const matchIndex = rawOffset + match.index;
-      newText.push(raw.substr(0, match.index));
-      let text = (match[3] || match[8] || match[11] || match[13]);
+      newTextParts.push(raw.substr(0, match.index));
+      const text = (match[3] || match[8] || match[11] || match[13]);
       rawOffset -= text.length;
       //text = text.replace(/^\s+|\s+$/g, '');
       rawOffset += text.length;
@@ -267,7 +266,7 @@ namespace RichTextProcessor {
       let entity: MessageEntity;
       pushedEntity = false;
       if(text.match(/^`*$/)) {
-        newText.push(match[0]);
+        newTextParts.push(match[0]);
       } else if(match[3]) { // pre
         entity = {
           _: 'messageEntityPre',
@@ -282,7 +281,7 @@ namespace RichTextProcessor {
             rawOffset -= 1;
           }
   
-          newText.push(match[1] + text + match[5]);
+          newTextParts.push(match[1] + text + match[5]);
           
           rawOffset -= match[2].length + match[4].length;
         }
@@ -290,7 +289,7 @@ namespace RichTextProcessor {
         const isSOH = match[6] === '\x01';
 
         entity = {
-          _: markdownEntities[match[7]] as (MessageEntity.messageEntityBold | MessageEntity.messageEntityCode | MessageEntity.messageEntityItalic)['_'],
+          _: markdownEntities[match[7]] as (MessageEntity.messageEntityBold | MessageEntity.messageEntityCode | MessageEntity.messageEntityItalic | MessageEntity.messageEntitySpoiler)['_'],
           //offset: matchIndex + match[6].length,
           offset: matchIndex + (isSOH ? 0 : match[6].length),
           length: text.length
@@ -298,9 +297,9 @@ namespace RichTextProcessor {
 
         if(pushEntity(entity)) {
           if(!isSOH) {
-            newText.push(match[6] + text + match[9]);
+            newTextParts.push(match[6] + text + match[9]);
           } else {
-            newText.push(text);
+            newTextParts.push(text);
           }
   
           rawOffset -= match[7].length * 2 + (isSOH ? 2 : 0);
@@ -308,13 +307,13 @@ namespace RichTextProcessor {
       } else if(match[11]) { // custom mention
         entity = {
           _: 'messageEntityMentionName',
-          user_id: +match[10],
+          user_id: match[10].toUserId(),
           offset: matchIndex,
           length: text.length
         };
         
         if(pushEntity(entity)) {
-          newText.push(text);
+          newTextParts.push(text);
           
           rawOffset -= match[0].length - text.length;
         }
@@ -327,33 +326,59 @@ namespace RichTextProcessor {
         };
         
         if(pushEntity(entity)) {
-          newText.push(text);
+          newTextParts.push(text);
 
           rawOffset -= match[12].length - text.length;
         }
       }
 
       if(!pushedEntity) {
-        newText.push(match[0]);
+        newTextParts.push(match[0]);
       }
 
       raw = raw.substr(match.index + match[0].length);
       rawOffset += match.index + match[0].length;
     }
 
-    newText.push(raw);
-    newText = newText.join('');
+    newTextParts.push(raw);
+    let newText = newTextParts.join('');
     if(!newText.replace(/\s+/g, '').length) {
-      newText = text;
+      newText = raw;
       entities.splice(0, entities.length);
     }
 
-    if(!entities.length && !noTrim) {
-      newText = newText.trim();
-    }
+    // ! idk what it was here for
+    // if(!entities.length && !noTrim) {
+    //   newText = newText.trim();
+    // }
 
     mergeEntities(currentEntities, entities);
     combineSameEntities(currentEntities);
+
+    let length = newText.length;
+    if(!noTrim) {
+      // trim left
+      newText = newText.replace(/^\s*/, '');
+
+      let diff = length - newText.length;
+      if(diff) {
+        currentEntities.forEach(entity => {
+          entity.offset = Math.max(0, entity.offset - diff);
+        });
+      }
+
+      // trim right
+      newText = newText.replace(/\s*$/, '');
+      diff = length - newText.length;
+      length = newText.length;
+      if(diff) {
+        currentEntities.forEach(entity => {
+          if((entity.offset + entity.length) > length) {
+            entity.length = length - entity.offset;
+          }
+        });
+      }
+    }
 
     return newText;
   }
@@ -380,10 +405,37 @@ namespace RichTextProcessor {
     });
 
     currentEntities.push(...filtered);
-    currentEntities.sort((a, b) => a.offset - b.offset);
+    sortEntities(currentEntities);
+    // currentEntities.sort((a, b) => a.offset - b.offset);
+    // currentEntities.sort((a, b) => (a.offset - b.offset) || (a._ === 'messageEntityCaret' && -1));
+
+    // * fix splitted emoji. messageEntityTextUrl can split the emoji if starts before its end (e.g. on fe0f)
+    // * have to fix even if emoji supported since it's being wrapped in span
+    // if(!IS_EMOJI_SUPPORTED) {
+      for(let i = 0; i < currentEntities.length; ++i) {
+        const entity = currentEntities[i];
+        if(entity._ === 'messageEntityEmoji') {
+          const nextEntity = currentEntities[i + 1];
+          if(nextEntity /* && nextEntity._ !== 'messageEntityCaret' */ && nextEntity.offset < (entity.offset + entity.length)) {
+            entity.length = nextEntity.offset - entity.offset;
+          }
+        }
+      }
+    // }
+
     return currentEntities;
   }
 
+  const CAN_COMBINE_ENTITIES: Set<MessageEntity['_']> = new Set([
+    'messageEntityBold',
+    'messageEntityItalic',
+    'messageEntityCode',
+    'messageEntityPre',
+    'messageEntityUnderline',
+    'messageEntityStrike',
+    'messageEntityBlockquote',
+    'messageEntitySpoiler'
+  ]);
   export function combineSameEntities(entities: MessageEntity[]) {
     //entities = entities.slice();
     for(let i = 0; i < entities.length; ++i) {
@@ -391,7 +443,10 @@ namespace RichTextProcessor {
 
       let nextEntityIdx = -1;
       do {
-        nextEntityIdx = entities.findIndex((e, _i) => _i !== i && e._ === entity._ && (e.offset - entity.length) === entity.offset);
+        nextEntityIdx = entities.findIndex((e, _i) => {
+          return CAN_COMBINE_ENTITIES.has(e._) && _i !== i && e._ === entity._ && (e.offset - entity.length) === entity.offset;
+        });
+
         if(nextEntityIdx !== -1) {
           const nextEntity = entities[nextEntityIdx];
           entity.length += nextEntity.length;
@@ -402,53 +457,114 @@ namespace RichTextProcessor {
     //return entities;
   }
 
-  export function wrapRichText(text: string, options: Partial<{
+  export function sortEntities(entities: MessageEntity[]) {
+    entities.sort((a, b) => {
+      return (a.offset - b.offset) || (b.length - a.length);
+    });
+  }
+
+  function setBlankToAnchor(anchor: HTMLAnchorElement) {
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    return anchor;
+  }
+
+  /**
+   * * Expecting correctly sorted nested entities (RichTextProcessor.sortEntities)
+   */
+   export function wrapRichText(text: string, options: Partial<{
     entities: MessageEntity[],
     contextSite: string,
     highlightUsername: string,
-    noLinks: true,
-    noLinebreaks: true,
-    noCommands: true,
-    wrappingDraft: true,
+    noLinks: boolean,
+    noLinebreaks: boolean,
+    noCommands: boolean,
+    wrappingDraft: boolean,
+    //mustWrapEmoji: boolean,
     fromBot: boolean,
-    noTextFormat: true,
+    noTextFormat: boolean,
     passEntities: Partial<{
       [_ in MessageEntity['_']]: boolean
     }>,
+    noEncoding: boolean,
 
-    contextHashtag?: string
+    contextHashtag?: string,
+    nasty?: {
+      i: number,
+      usedLength: number,
+      text: string,
+      lastEntity?: MessageEntity
+    },
+    voodoo?: boolean
   }> = {}) {
+    const fragment = document.createDocumentFragment();
     if(!text) {
-      return '';
+      return fragment;
     }
 
-    const lol: {
-      part: string,
-      offset: number
-    }[] = [];
-    const entities = options.entities || parseEntities(text);
-
-    const passEntities: typeof options.passEntities = options.passEntities || {};
-    const contextSite = options.contextSite || 'Telegram';
-    const contextExternal = contextSite !== 'Telegram';
-
-    const insertPart = (entity: MessageEntity, startPart: string, endPart?: string) => {
-      lol.push({part: startPart, offset: entity.offset});
-
-      if(endPart) {
-        lol.unshift({part: endPart, offset: entity.offset + entity.length});
-      }
+    const nasty = options.nasty ??= {
+      i: 0,
+      usedLength: 0,
+      text
     };
 
-    for(let i = 0, length = entities.length; i < length; ++i) {
-      const entity = entities[i];
+    const entities = options.entities ??= parseEntities(nasty.text);
+
+    const passEntities = options.passEntities ??= {};
+    const contextSite = options.contextSite ??= 'Telegram';
+    const contextExternal = contextSite !== 'Telegram';
+
+    const textLength = nasty.text.length;
+    const length = entities.length;
+    let lastElement: HTMLElement | DocumentFragment;
+    for(; nasty.i < length; ++nasty.i) {
+      let entity = entities[nasty.i];
+
+      // * check whether text was sliced
+      // TODO: consider about moving it to other function
+      if(entity.offset >= textLength) {
+        if(entity._ !== 'messageEntityCaret') { // * can set caret to the end
+          continue;
+        }
+      } else if((entity.offset + entity.length) > textLength) {
+        entity = copy(entity);
+        entity.length = entity.offset + entity.length - textLength;
+      }
+
+      if(entity.length) {
+        nasty.lastEntity = entity;
+      }
+
+      let nextEntity = entities[nasty.i + 1];
+
+      const startOffset = entity.offset;
+      const endOffset = startOffset + entity.length;
+      const endPartOffset = Math.min(endOffset, nextEntity?.offset ?? 0xFFFF);
+      const fullEntityText = nasty.text.slice(startOffset, endOffset);
+      const sliced = nasty.text.slice(startOffset, endPartOffset);
+      let partText = sliced;
+
+      if(nasty.usedLength < startOffset) {
+        (lastElement || fragment).append(nasty.text.slice(nasty.usedLength, startOffset));
+      }
+
+      if(lastElement) {
+        lastElement = fragment;
+      }
+
+      nasty.usedLength = endPartOffset;
+
+      let element: HTMLElement, 
+        property: 'textContent' | 'alt' = 'textContent',
+        usedText = false;
       switch(entity._) {
         case 'messageEntityBold': {
           if(!options.noTextFormat) {
             if(options.wrappingDraft) {
-              insertPart(entity, '<span style="font-weight: bold;">', '</span>');
+              element = document.createElement('span');
+              element.style.fontWeight = 'bold';
             } else {
-              insertPart(entity, '<strong>', '</strong>');
+              element = document.createElement('strong');
             }
           }
 
@@ -458,9 +574,10 @@ namespace RichTextProcessor {
         case 'messageEntityItalic': {
           if(!options.noTextFormat) {
             if(options.wrappingDraft) {
-              insertPart(entity, '<span style="font-style: italic;">', '</span>');
+              element = document.createElement('span');
+              element.style.fontStyle = 'italic';
             } else {
-              insertPart(entity, '<em>', '</em>');
+              element = document.createElement('em');
             }
           }
 
@@ -469,10 +586,11 @@ namespace RichTextProcessor {
 
         case 'messageEntityStrike': {
           if(options.wrappingDraft) {
-            const styleName = isSafari ? 'text-decoration' : 'text-decoration-line';
-            insertPart(entity, `<span style="${styleName}: line-through;">`, '</span>');
-          } else {
-            insertPart(entity, '<del>', '</del>');
+            const styleName = IS_SAFARI ? 'text-decoration' : 'text-decoration-line';
+            element = document.createElement('span');
+            element.style.cssText = `${styleName}: line-through;`;
+          } else if(!options.noTextFormat) {
+            element = document.createElement('del');
           }
 
           break;
@@ -480,68 +598,106 @@ namespace RichTextProcessor {
 
         case 'messageEntityUnderline': {
           if(options.wrappingDraft) {
-            const styleName = isSafari ? 'text-decoration' : 'text-decoration-line';
-            insertPart(entity, `<span style="${styleName}: underline;">`, '</span>');
-          } else {
-            insertPart(entity, '<u>', '</u>');
+            const styleName = IS_SAFARI ? 'text-decoration' : 'text-decoration-line';
+            element = document.createElement('span');
+            element.style.cssText = `${styleName}: underline;`;
+          } else if(!options.noTextFormat) {
+            element = document.createElement('u');
           }
 
           break;
         }
-          
+        
+        case 'messageEntityPre':
         case 'messageEntityCode': {
           if(options.wrappingDraft) {
-            insertPart(entity, '<span style="font-family: monospace;">', '</span>');
-          } else {
-            insertPart(entity, '<code>', '</code>');
+            element = document.createElement('span');
+            element.style.fontFamily = 'var(--font-monospace)';
+          } else if(!options.noTextFormat) {
+            element = document.createElement('code');
           }
           
           break;
         }
           
-        case 'messageEntityPre': {
-          if(!options.noTextFormat) {
-            insertPart(entity, `<pre><code${entity.language ? ' class="language-' + encodeEntities(entity.language) + '"' : ''}>`, '</code></pre>');
-          }
+        // case 'messageEntityPre': {
+        //   if(options.wrappingDraft) {
+        //     element = document.createElement('span');
+        //     element.style.fontFamily = 'var(--font-monospace)';
+        //   } else if(!options.noTextFormat) {
+        //     element = document.createElement('pre');
+        //     const inner = document.createElement('code');
+        //     if(entity.language) {
+        //       inner.className = 'language-' + entity.language;
+        //       inner.textContent = entityText;
+        //       usedText = true;
+        //     }
+        //   }
           
-          break;
-        }
+        //   break;
+        // }
 
         case 'messageEntityHighlight': {
-          insertPart(entity, '<i class="text-highlight">', '</i>');
+          element = document.createElement('i');
+          element.className = 'text-highlight';
           break;
         }
 
         case 'messageEntityBotCommand': {
           // if(!(options.noLinks || options.noCommands || contextExternal)/*  && !entity.unsafe */) {
           if(!options.noLinks && passEntities[entity._]) {
-            const entityText = text.substr(entity.offset, entity.length);
-            let command = entityText.substr(1);
+            let command = fullEntityText.slice(1);
             let bot: string | boolean;
             let atPos: number;
             if((atPos = command.indexOf('@')) !== -1) {
-              bot = command.substr(atPos + 1);
-              command = command.substr(0, atPos);
+              bot = command.slice(atPos + 1);
+              command = command.slice(0, atPos);
             } else {
               bot = options.fromBot;
             }
 
-            insertPart(entity, `<a href="${encodeEntities('tg://bot_command?command=' + encodeURIComponent(command) + (bot ? '&bot=' + encodeURIComponent(bot) : ''))}" ${contextExternal ? '' : 'onclick="execBotCommand(this)"'}>`, `</a>`);
+            element = document.createElement('a');
+            (element as HTMLAnchorElement).href = encodeEntities('tg://bot_command?command=' + encodeURIComponent(command) + (bot ? '&bot=' + encodeURIComponent(bot) : ''));
+            if(!contextExternal) {
+              element.setAttribute('onclick', 'execBotCommand(this)');
+            }
           }
 
           break;
         }
 
         case 'messageEntityEmoji': {
-          //if(!(options.wrappingDraft && emojiSupported)) { // * fix safari emoji
-          if(!emojiSupported) { // no wrapping needed
-            // if(emojiSupported) { // ! contenteditable="false" нужен для поля ввода, иначе там будет меняться шрифт в Safari, или же рендерить смайлик напрямую, без контейнера
+          let isSupported = IS_EMOJI_SUPPORTED;
+          if(isSupported) {
+            for(const version in EmojiVersions) {
+              if(version) {
+                const emojiData = EmojiVersions[version];
+                if(emojiData.hasOwnProperty(entity.unicode)) {
+                  isSupported = false;
+                  break;
+                }
+              }
+            }
+          }
+
+          //if(!(options.wrappingDraft && isSupported)) { // * fix safari emoji
+          if(!isSupported) { // no wrapping needed
+            // if(isSupported) { // ! contenteditable="false" нужен для поля ввода, иначе там будет меняться шрифт в Safari, или же рендерить смайлик напрямую, без контейнера
             //   insertPart(entity, '<span class="emoji">', '</span>');
             // } else {
-              insertPart(entity, `<img src="assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
+              element = document.createElement('img');
+              (element as HTMLImageElement).src = `assets/img/emoji/${entity.unicode}.png`;
+              property = 'alt';
+              element.className = 'emoji';
             // }
-          }
-          /* if(!emojiSupported) {
+          //} else if(options.mustWrapEmoji) {
+          } else if(!options.wrappingDraft) {
+            element = document.createElement('span');
+            element.className = 'emoji';
+          }/*  else if(!IS_SAFARI) {
+            insertPart(entity, '<span class="emoji" contenteditable="false">', '</span>');
+          } */
+          /* if(!isSupported) {
             insertPart(entity, `<img src="assets/img/emoji/${entity.unicode}.png" alt="`, `" class="emoji">`);
           } */
 
@@ -549,57 +705,71 @@ namespace RichTextProcessor {
         }
         
         case 'messageEntityCaret': {
-          insertPart(entity, '<span class="composer-sel"></span>');
+          element = document.createElement('span');
+          element.className = 'composer-sel';
           break;
         }
 
-        /* case 'messageEntityLinebreak': {
-          if(options.noLinebreaks) {
-            insertPart(entity, ' ');
-          } else {
-            insertPart(entity, '<br/>');
-          }
+        // case 'messageEntityLinebreak': {
+        //   if(options.noLinebreaks) {
+        //     insertPart(entity, ' ');
+        //   } else {
+        //     insertPart(entity, '<br/>');
+        //   }
           
-          break;
-        } */
+        //   break;
+        // }
 
         case 'messageEntityUrl':
         case 'messageEntityTextUrl': {
           if(!(options.noLinks && !passEntities[entity._])) {
-            const entityText = text.substr(entity.offset, entity.length);
-
             // let inner: string;
-            let url: string;
+            let url: string = (entity as MessageEntity.messageEntityTextUrl).url || fullEntityText;
             let masked = false;
-            if(entity._ === 'messageEntityTextUrl') {
-              url = (entity as MessageEntity.messageEntityTextUrl).url;
-              url = wrapUrl(url, true);
+            let onclick: string;
 
-              const nextEntity = entities[i + 1];
+            const wrapped = wrapUrl(url, true);
+            url = wrapped.url;
+            onclick = wrapped.onclick;
+
+            if(entity._ === 'messageEntityTextUrl') {
               if(nextEntity?._ === 'messageEntityUrl' && 
                 nextEntity.length === entity.length && 
                 nextEntity.offset === entity.offset) {
-                i++;
+                nasty.i++;
               }
 
-              if(url !== entityText) {
+              if(url !== fullEntityText) {
                 masked = true;
               }
             } else {
-              url = wrapUrl(entityText, false);
               //inner = encodeEntities(replaceUrlEncodings(entityText));
             }
 
-            const currentContext = url[0] === '#';
+            const currentContext = !!onclick;
+            if(!onclick && masked && !currentContext) {
+              onclick = 'showMaskedAlert';
+            }
+
+            if(options.wrappingDraft) {
+              onclick = undefined;
+            }
 
             const href = (currentContext || typeof electronHelpers === 'undefined') 
-              ? encodeEntities(url)
-              : `javascript:electronHelpers.openExternal('${encodeEntities(url)}');`;
+              ? url
+              : `javascript:electronHelpers.openExternal('${url}');`;
 
-            const target = (currentContext || typeof electronHelpers !== 'undefined')
-              ? '' : ' target="_blank" rel="noopener noreferrer"';
+            element = document.createElement('a');
+            element.className = 'anchor-url';
+            (element as HTMLAnchorElement).href = href;
 
-            insertPart(entity, `<a class="anchor-url" href="${href}"${target}${masked && !currentContext ? 'onclick="showMaskedAlert(this)"' : ''}>`, '</a>');
+            if(!(currentContext || typeof electronHelpers !== 'undefined')) {
+              setBlankToAnchor(element as HTMLAnchorElement);
+            }
+
+            if(onclick) {
+              element.setAttribute('onclick', onclick + '(this)');
+            }
           }
 
           break;
@@ -607,8 +777,9 @@ namespace RichTextProcessor {
 
         case 'messageEntityEmail': {
           if(!options.noLinks) {
-            const entityText = text.substr(entity.offset, entity.length);
-            insertPart(entity, `<a href="${encodeEntities('mailto:' + entityText)}" target="_blank" rel="noopener noreferrer">`, '</a>');
+            element = document.createElement('a');
+            (element as HTMLAnchorElement).href = encodeEntities('mailto:' + fullEntityText);
+            setBlankToAnchor(element as HTMLAnchorElement);
           }
 
           break;
@@ -617,60 +788,128 @@ namespace RichTextProcessor {
         case 'messageEntityHashtag': {
           const contextUrl = !options.noLinks && siteHashtags[contextSite];
           if(contextUrl) {
-            const entityText = text.substr(entity.offset, entity.length);
-            const hashtag = entityText.substr(1);
-            insertPart(entity, `<a class="anchor-hashtag" href="${contextUrl.replace('{1}', encodeURIComponent(hashtag))}"${contextExternal ? ' target="_blank" rel="noopener noreferrer"' : ' onclick="searchByHashtag(this)"'}>`, '</a>');
+            const hashtag = fullEntityText.slice(1);
+            element = document.createElement('a');
+            element.className = 'anchor-hashtag';
+            (element as HTMLAnchorElement).href = contextUrl.replace('{1}', encodeURIComponent(hashtag));
+            if(contextExternal) {
+              setBlankToAnchor(element as HTMLAnchorElement);
+            } else {
+              element.setAttribute('onclick', 'searchByHashtag(this)');
+            }
           }
 
           break;
         }
 
         case 'messageEntityMentionName': {
-          if(!options.noLinks) {
-            insertPart(entity, `<a href="#/im?p=u${encodeURIComponent(entity.user_id)}" class="follow" data-follow="${entity.user_id}">`, '</a>');
+          if(!(options.noLinks && !passEntities[entity._])) {
+            element = document.createElement('a');
+            (element as HTMLAnchorElement).href = `#/im?p=${encodeURIComponent(entity.user_id)}`;
+            element.className = 'follow';
+            element.dataset.follow = '' + entity.user_id;
           }
 
           break;
         }
 
         case 'messageEntityMention': {
-          const contextUrl = !options.noLinks && siteMentions[contextSite];
-          if(contextUrl) {
-            const entityText = text.substr(entity.offset, entity.length);
-            const username = entityText.substr(1);
+          // const contextUrl = !options.noLinks && siteMentions[contextSite];
+          if(!options.noLinks) {
+            const username = fullEntityText.slice(1);
 
-            insertPart(entity, `<a class="mention" href="${contextUrl.replace('{1}', encodeURIComponent(username))}"${contextExternal ? ' target="_blank" rel="noopener noreferrer"' : ''}>`, '</a>');
+            const {url, onclick} = wrapUrl('t.me/' + username);
+
+            element = document.createElement('a');
+            element.className = 'mention';
+            (element as HTMLAnchorElement).href = url;
+            if(onclick) {
+              element.setAttribute('onclick', `${onclick}(this)`);
+            }
+
+            // insertPart(entity, `<a class="mention" href="${contextUrl.replace('{1}', encodeURIComponent(username))}"${contextExternal ? ' target="_blank" rel="noopener noreferrer"' : ''}>`, '</a>');
+          }
+          
+          break;
+        }
+
+        case 'messageEntitySpoiler': {
+          if(options.noTextFormat) {
+            const before = nasty.text.slice(0, entity.offset);
+            const spoilerBefore = nasty.text.slice(entity.offset, entity.offset + entity.length);
+            const spoilerAfter = partText = spoiler(spoilerBefore)/*  '▚'.repeat(entity.length) */;
+            const after = nasty.text.slice(entity.offset + entity.length);
+            nasty.text = before + spoilerAfter + after;
+          } else if(options.wrappingDraft) {
+            element = document.createElement('span');
+            element.style.fontFamily = 'spoiler';
+          } else {
+            const container = document.createElement('span');
+            container.className = 'spoiler';
+            element = document.createElement('span');
+            element.className = 'spoiler-text';
+            element.textContent = partText;
+            usedText = true;
+            container.append(element);
+            fragment.append(container);
           }
           
           break;
         }
       }
-    }
 
-    lol.sort((a, b) => a.offset - b.offset);
-
-    let out = '';
-    let usedLength = 0;
-    for(const {part, offset} of lol) {
-      if(offset > usedLength) {
-        out += encodeEntities(text.slice(usedLength, offset));
-        usedLength = offset;
+      if(!usedText) {
+        if(element) {
+          // @ts-ignore
+          element[property] = partText;
+        } else {
+          (element || fragment).append(partText);
+        }
       }
 
-      out += part;
+      if(element && !element.parentElement) {
+        (lastElement || fragment).append(element);
+      }
 
-      
+      while(nextEntity && nextEntity.offset < (endOffset - 1)) {
+        ++nasty.i;
+
+        (element || fragment).append(wrapRichText(nasty.text, {
+          ...options,
+          voodoo: true
+        }));
+
+        nextEntity = entities[nasty.i + 1];
+      }
+
+      // if(!element?.parentElement) {
+      //   (lastElement || fragment).append(element ?? partText);
+      // }
+
+      if(entity.length > partText.length && element) {
+        lastElement = element;
+      } else {
+        lastElement = fragment;
+      }
+
+      if(options.voodoo) {
+        return fragment;
+      }
     }
 
-    if(usedLength < text.length) {
-      out += encodeEntities(text.slice(usedLength));
+    if(nasty.lastEntity) {
+      nasty.usedLength = nasty.lastEntity.offset + nasty.lastEntity.length;
     }
 
-    return out;
+    if(nasty.usedLength < textLength) {
+      (lastElement || fragment).append(nasty.text.slice(nasty.usedLength));
+    }
+
+    return fragment;
   }
 
   export function fixEmoji(text: string, entities?: MessageEntity[]) {
-    /* if(!emojiSupported) {
+    /* if(!IS_EMOJI_SUPPORTED) {
       return text;
     } */
     // '$`\ufe0f'
@@ -701,7 +940,7 @@ namespace RichTextProcessor {
     entities: MessageEntity[]
   }> = {}) {
     if(!text) {
-      return '';
+      return wrapRichText('');
     }
 
     return wrapRichText(text, {
@@ -709,7 +948,8 @@ namespace RichTextProcessor {
       noLinks: true,
       wrappingDraft: true,
       passEntities: {
-        messageEntityTextUrl: true
+        messageEntityTextUrl: true,
+        messageEntityMentionName: true
       }
     });
   }
@@ -729,8 +969,21 @@ namespace RichTextProcessor {
     }
     return url;
   }
+
+  export function spoiler(text: string): string {
+    const chars = '⠁⠂⠄⠈⠐⠠⡀⢀⠃⠅⠆⠉⠊⠌⠑⠒⠔⠘⠡⠢⠤⠨⠰⡁⡂⡄⡈⡐⡠⢁⢂⢄⢈⢐⢠⣀⠇⠋⠍⠎⠓⠕⠖⠙⠚⠜⠣⠥⠦⠩⠪⠬⠱⠲⠴⠸⡃⡅⡆⡉⡊⡌⡑⡒⡔⡘⡡⡢⡤⡨⡰⢃⢅⢆⢉⢊⢌⢑⢒⢔⢘⢡⢢⢤⢨⢰⣁⣂⣄⣈⣐⣠⠏⠗⠛⠝⠞⠧⠫⠭⠮⠳⠵⠶⠹⠺⠼⡇⡋⡍⡎⡓⡕⡖⡙⡚⡜⡣⡥⡦⡩⡪⡬⡱⡲⡴⡸⢇⢋⢍⢎⢓⢕⢖⢙⢚⢜⢣⢥⢦⢩⢪⢬⢱⢲⢴⢸⣃⣅⣆⣉⣊⣌⣑⣒⣔⣘⣡⣢⣤⣨⣰⠟⠯⠷⠻⠽⠾⡏⡗⡛⡝⡞⡧⡫⡭⡮⡳⡵⡶⡹⡺⡼⢏⢗⢛⢝⢞⢧⢫⢭⢮⢳⢵⢶⢹⢺⢼⣇⣋⣍⣎⣓⣕⣖⣙⣚⣜⣣⣥⣦⣩⣪⣬⣱⣲⣴⣸⠿⡟⡯⡷⡻⡽⡾⢟⢯⢷⢻⢽⢾⣏⣗⣛⣝⣞⣧⣫⣭⣮⣳⣵⣶⣹⣺⣼⡿⢿⣟⣯⣷⣻⣽⣾⣿';
+    const charsLength = chars.length;
+    
+    const out: string[] = [];
+    for(let i = 0; i < text.length; ++i) {
+      let char = text.charCodeAt(i);
+      out.push(chars[char % charsLength]);
+    }
+
+    return out.join('');
+  }
   
-  export function replaceUrlEncodings(urlWithEncoded: string) {
+  /* export function replaceUrlEncodings(urlWithEncoded: string) {
     return urlWithEncoded.replace(/(%[A-Z\d]{2})+/g, (str) => {
       try {
         return decodeURIComponent(str);
@@ -738,110 +991,79 @@ namespace RichTextProcessor {
         return str;
       }
     });
-  }
+  } */
   
-  export function wrapPlainText(text: any) {
-    if(emojiSupported) {
-      return text;
+  /**
+   * ! This function is still unsafe to use with .innerHTML
+   */
+  export function wrapPlainText(text: string, entities: MessageEntity[] = []) {
+    if(entities?.length) {
+      entities = entities.filter(entity => entity._ === 'messageEntitySpoiler');
     }
   
-    if(!text || !text.length) {
-      return '';
-    }
-  
-    text = text.replace(/\ufe0f/g, '', text);
-    var match;
-    var raw = text;
-    var text: any = [],
-      emojiTitle;
-    fullRegExp.lastIndex = 0;
-    while((match = raw.match(fullRegExp))) {
-      text.push(raw.substr(0, match.index))
-      if(match[8]) {
-        // @ts-ignore
-        const emojiCode = EmojiHelper.emojiMap[match[8]];
-        if(emojiCode &&
-        // @ts-ignore
-          (emojiTitle = emojiData[emojiCode][1][0])) {
-          text.push(':' + emojiTitle + ':');
-        } else {
-          text.push(match[0]);
-        }
-      } else {
-        text.push(match[0]);
-      }
-  
-      raw = raw.substr(match.index + match[0].length);
-    }
-    text.push(raw);
-    return text.join('');
+    return wrapRichText(text, {
+      entities, 
+      noEncoding: true,
+      noTextFormat: true,
+      noLinebreaks: true,
+      noLinks: true
+    }).textContent;
   }
 
-  export function wrapEmojiText(text: string) {
-    if(!text) return '';
+  export function wrapEmojiText(text: string, isDraft = false) {
+    if(!text) return wrapRichText('');
   
     let entities = parseEntities(text).filter(e => e._ === 'messageEntityEmoji');
-    return wrapRichText(text, {entities});
+    return wrapRichText(text, {entities, wrappingDraft: isDraft});
   }
 
-  export function wrapUrl(url: string, unsafe?: number | boolean): string {
+  export function wrapUrl(url: string, unsafe?: number | boolean): {url: string, onclick: string} {
     if(!matchUrlProtocol(url)) {
       url = 'https://' + url;
     }
   
-    let tgMeMatch;
-    let telescoPeMatch;
+    let tgMeMatch, telescoPeMatch, tgMatch;
+    let onclick: string;
     /* if(unsafe === 2) {
       url = 'tg://unsafe_url?url=' + encodeURIComponent(url);
     } else  */if((tgMeMatch = url.match(/^(?:https?:\/\/)?t(?:elegram)?\.me\/(.+)/))) {
       const fullPath = tgMeMatch[1];
+
+      // second regexp is for phone numbers (t.me/+38050...)
+      if(/^\W/.test(fullPath) && !PHONE_NUMBER_REG_EXP.test(fullPath)) {
+        onclick = 'joinchat';
+        return {url, onclick};
+      }
+
       const path = fullPath.split('/');
       switch(path[0]) {
         case 'joinchat':
-          url = 'tg://join?invite=' + path[1];
-          break;
-  
         case 'addstickers':
-          url = 'tg://addstickers?set=' + path[1];
+        case 'voicechat':
+          onclick = path[0];
           break;
-  
-        default:
-          if(path[1] && path[1].match(/^\d+$/)) {               // https://t.me/.+/[0-9]+ (channel w/ username)
-            if(path[0] === 'c' && path[2]) {                    // https://t.me/c/111111111/111 (channel w/o username)
-              url = '#/im?p=' + path[1] + '&post=' + path[2];
-            } else {                                            // https://t.me/durov/151 (channel w/ username)
-              url = siteMentions['Telegram'].replace('{1}', path[0] + '&post=' + path[1]);
-            }
-          } else if(path.length === 1) {
-            const domainQuery = path[0].split('?');
-            const domain = domainQuery[0];
-            const query = domainQuery[1];
 
-            if(domain === 'iv') {
-              const match = (query || '').match(/url=([^&=]+)/);
-              if(match) {
-                url = match[1];
-                try {
-                  url = decodeURIComponent(url);
-                } catch (e) {}
-  
-                return wrapUrl(url, unsafe);
-              }
-            }
-  
-            url = siteMentions['Telegram'].replace('{1}', domain + (query ? '&' + query : ''));
-            //url = 'tg://resolve?domain=' + domain + (query ? '&' + query : '');
+        default:
+          if((path[1] && path[1].match(/^\d+(?:\?(?:comment|thread)=\d+)?$/)) || path.length === 1) {
+            onclick = 'im';
+            break;
           }
 
           break;
       }
     } else if((telescoPeMatch = url.match(/^(?:https?:\/\/)?telesco\.pe\/([^/?]+)\/(\d+)/))) {
-      url = 'tg://resolve?domain=' + telescoPeMatch[1] + '&post=' + telescoPeMatch[2];
+      onclick = 'im';
+    } else if((tgMatch = url.match(/tg:(?:\/\/)?(.+?)(?:\?|$)/))) {
+      onclick = 'tg_' + tgMatch[1];
     }/*  else if(unsafe) {
       url = 'tg://unsafe_url?url=' + encodeURIComponent(url);
     } */
+
+    if(!(window as any)[onclick]) {
+      onclick = undefined;
+    }
   
-    return url;
+    return {url, onclick};
   }
 
   export function matchUrlProtocol(text: string) {
@@ -857,6 +1079,7 @@ namespace RichTextProcessor {
   }
 
   export function getAbbreviation(str: string, onlyFirst = false) {
+    if(!str) return '';
     const splitted = str.trim().split(' ');
     if(!splitted[0]) return '';
 

@@ -8,10 +8,10 @@
 
 import { AnyToVoidFunction } from '../types';
 import ListenerSetter from '../helpers/listenerSetter';
-import { CancellablePromise, deferredPromise } from '../helpers/cancellablePromise';
-import { pause } from '../helpers/schedulers';
+import deferredPromise, { CancellablePromise } from '../helpers/cancellablePromise';
 import rootScope from '../lib/rootScope';
 import DEBUG from '../config/debug';
+import pause from '../helpers/schedulers/pause';
 
 const ANIMATION_START_EVENT = 'event-heavy-animation-start';
 const ANIMATION_END_EVENT = 'event-heavy-animation-end';
@@ -27,7 +27,7 @@ const log = console.log.bind(console.log, '[HEAVY-ANIMATION]:');
 export function dispatchHeavyAnimationEvent(promise: Promise<any>, timeout?: number) {
   if(!isAnimating) {
     heavyAnimationPromise = deferredPromise<void>();
-    rootScope.broadcast(ANIMATION_START_EVENT);
+    rootScope.dispatchEvent(ANIMATION_START_EVENT);
     isAnimating = true;
     DEBUG && log('start');
   }
@@ -64,7 +64,7 @@ function onHeavyAnimationEnd() {
 
   isAnimating = false;
   promisesInQueue = 0;
-  rootScope.broadcast(ANIMATION_END_EVENT);
+  rootScope.dispatchEvent(ANIMATION_END_EVENT);
   heavyAnimationPromise.resolve();
 
   DEBUG && log('end');
@@ -88,7 +88,7 @@ export default function(
       handleAnimationStart();
     }
 
-    const add = listenerSetter ? listenerSetter.add.bind(listenerSetter, rootScope) : rootScope.addEventListener.bind(rootScope);
+    const add = listenerSetter ? listenerSetter.add(rootScope) : rootScope.addEventListener.bind(rootScope);
     const remove = listenerSetter ? listenerSetter.removeManual.bind(listenerSetter, rootScope) : rootScope.removeEventListener.bind(rootScope);
     add(ANIMATION_START_EVENT, handleAnimationStart);
     add(ANIMATION_END_EVENT, handleAnimationEnd);

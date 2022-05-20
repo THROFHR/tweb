@@ -5,15 +5,17 @@
  */
 
 import { MOUNT_CLASS_TO } from "../config/debug";
-import { isMobileSafari } from "../helpers/userAgent";
+import { IS_MOBILE_SAFARI } from "../environment/userAgent";
 import { logger } from "../lib/logger";
-import { doubleRaf } from "../helpers/schedulers";
 import blurActiveElement from "../helpers/dom/blurActiveElement";
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
+import isSwipingBackSafari from "../helpers/dom/isSwipingBackSafari";
+import indexOfAndSplice from "../helpers/array/indexOfAndSplice";
 
 export type NavigationItem = {
   type: 'left' | 'right' | 'im' | 'chat' | 'popup' | 'media' | 'menu' | 
-    'esg' | 'multiselect' | 'input-helper' | 'autocomplete-helper' | 'markup' | 'global-search',
+    'esg' | 'multiselect' | 'input-helper' | 'autocomplete-helper' | 'markup' | 
+    'global-search' | 'voice' | 'mobile-search' | 'filters' | 'global-search-focus',
   onPop: (canAnimate: boolean) => boolean | void,
   onEscape?: () => boolean,
   noHistory?: boolean,
@@ -67,13 +69,23 @@ export class AppNavigationController {
       }
     }, {capture: true, passive: false});
 
-    if(isMobileSafari) {
+    if(IS_MOBILE_SAFARI) {
       const options = {passive: true};
       window.addEventListener('touchstart', (e) => {
         if(e.touches.length > 1) return;
         this.debug && this.log('touchstart');
 
-        const detach = () => {
+        if(isSwipingBackSafari(e)) {
+          isPossibleSwipe = true;
+
+          window.addEventListener('touchend', () => {
+            setTimeout(() => {
+              isPossibleSwipe = false;
+            }, 100);
+          }, {passive: true, once: true});
+        }
+
+        /* const detach = () => {
           window.removeEventListener('touchend', onTouchEnd);
           window.removeEventListener('touchmove', onTouchMove);
         };
@@ -105,7 +117,7 @@ export class AppNavigationController {
         };
 
         window.addEventListener('touchend', onTouchEnd, options);
-        window.addEventListener('touchmove', onTouchMove, options);
+        window.addEventListener('touchmove', onTouchMove, options); */
       }, options);
     }
 
@@ -139,26 +151,46 @@ export class AppNavigationController {
     if(type) {
       const ret = this.findItemByType(type);
       if(ret) {
-        this.manual = true;
-        // ! commented because 'popstate' event will be fired with delay
-        //if(ret.index !== (this.navigations.length - 1)) {
-          this.navigations.splice(ret.index, 1);
-          this.handleItem(ret.item);
-          return;
-        //}
+        this.backByItem(ret.item, ret.index);
+        return;
       }
     }
 
     history.back();
   }
 
-  public pushItem(item: NavigationItem) {
-    this.navigations.push(item);
+  public backByItem(item: NavigationItem, index = this.navigations.indexOf(item)) {
+    this.manual = true;
+    // ! commented because 'popstate' event will be fired with delay
+    //if(index !== (this.navigations.length - 1)) {
+      this.navigations.splice(index, 1);
+      this.handleItem(item);
+    //}
+  }
+
+  private onItemAdded(item: NavigationItem) {
     this.debug && this.log('pushstate', item, this.navigations);
 
     if(!item.noHistory) {
       this.pushState();
     }
+  }
+
+  public pushItem(item: NavigationItem) {
+    this.navigations.push(item);
+    this.onItemAdded(item);
+  }
+
+  public unshiftItem(item: NavigationItem) {
+    this.navigations.unshift(item);
+    this.onItemAdded(item);
+  }
+
+  public spliceItems(index: number, length: number, ...items: NavigationItem[]) {
+    this.navigations.splice(index, length, ...items);
+    items.forEach((item) => {
+      this.onItemAdded(item);
+    });
   }
 
   private pushState() {
@@ -171,7 +203,11 @@ export class AppNavigationController {
   }
 
   public removeItem(item: NavigationItem) {
-    this.navigations.findAndSplice(i => i === item);
+    if(!item) {
+      return;
+    }
+    
+    indexOfAndSplice(this.navigations, item);
   }
 
   public removeByType(type: NavigationItem['type'], single = false) {

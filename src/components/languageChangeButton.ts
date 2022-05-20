@@ -4,8 +4,9 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { attachClickEvent } from "../helpers/dom/clickEvent";
+import loadFonts from "../helpers/dom/loadFonts";
 import { Config, LangPackDifference, LangPackString } from "../layer";
 import I18n, { LangPackKey } from "../lib/langPack";
 import apiManager from "../lib/mtproto/mtprotoworker";
@@ -13,19 +14,11 @@ import rootScope from "../lib/rootScope";
 import Button from "./button";
 import { putPreloader } from "./misc";
 
-let set = false, times = 0;
-rootScope.addEventListener('language_change', () => {
-  if(++times < 2) {
-    return;
-  }
-
-  console.log('language_change');
-  set = true;
-});
+let set = false;
 
 function getLang(): Promise<[Config.config, LangPackString[], LangPackDifference.langPackDifference]> {
   if(cachedPromise) return cachedPromise;
-  return cachedPromise = apiManager.invokeApiCacheable('help.getConfig').then(config => {
+  return cachedPromise = apiManager.getConfig().then(config => {
     if(config.suggested_lang_code !== I18n.lastRequestedLangCode) {
       //I18n.loadLangPack(config.suggested_lang_code);
 
@@ -60,12 +53,18 @@ export default function getLanguageChangeButton(appendTo: HTMLElement) {
       I18n.strings.set(string.key as LangPackKey, string);
     });
 
-    const btnChangeLanguage = Button('btn-primary btn-secondary btn-primary-transparent primary', {text: 'Login.ContinueOnLanguage'});
-    appendTo.append(btnChangeLanguage);
+    const key: LangPackKey = 'Login.ContinueOnLanguage';
+    const btnChangeLanguage = Button('btn-primary btn-secondary btn-primary-transparent primary', {text: key});
+    btnChangeLanguage.lastElementChild.classList.remove('i18n'); // prevent changing language
+    loadFonts({text: [I18n.format(key, true)]}).then(() => {
+      window.requestAnimationFrame(() => {
+        appendTo.append(btnChangeLanguage);
+      });
+    });
 
     rootScope.addEventListener('language_change', () => {
       btnChangeLanguage.remove();
-    }, true);
+    }, {once: true});
 
     backup.forEach(string => {
       I18n.strings.set(string.key as LangPackKey, string);
@@ -73,6 +72,8 @@ export default function getLanguageChangeButton(appendTo: HTMLElement) {
     
     attachClickEvent(btnChangeLanguage, (e) => {
       cancelEvent(e);
+
+      set = true;
 
       btnChangeLanguage.disabled = true;
       putPreloader(btnChangeLanguage);

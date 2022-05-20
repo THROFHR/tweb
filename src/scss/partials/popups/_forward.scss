@@ -38,6 +38,7 @@
     display: flex;
     width: 100%;
     flex-direction: row;
+    flex: 1 1 auto;
   }
 
   .selector {
@@ -55,11 +56,20 @@
     .chatlist {
       margin-top: 0 !important;
   
-      li {
+      &-chat {
         height: 3.875rem !important;
         padding-top: .5rem !important;
         padding-bottom: .5rem !important;
       }
     }
+  }
+
+  .gradient-delimiter {
+    display: none;
+  }
+
+  .sidebar-left-section {
+    padding-top: 0 !important;
+    margin-bottom: 0 !important;
   }
 }

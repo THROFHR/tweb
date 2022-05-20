@@ -9,23 +9,32 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
+import type { ConnectionStatusChange } from "./connectionStatus";
 import MTPNetworker from "./networker";
-import { ConnectionStatusChange, InvokeApiOptions } from "../../types";
-import MTTransport from "./transports/transport";
+import { InvokeApiOptions } from "../../types";
+import App from "../../config/app";
+import { MOUNT_CLASS_TO } from "../../config/debug";
+import indexOfAndSplice from "../../helpers/array/indexOfAndSplice";
 
 export class NetworkerFactory {
   private networkers: MTPNetworker[] = [];
+  public language = navigator.language || App.langPackCode;
   public updatesProcessor: (obj: any) => void = null;
   public onConnectionStatusChange: (info: ConnectionStatusChange) => void = null;
   public akStopped = false;
+  public userAgent = navigator.userAgent;
+
+  public removeNetworker(networker: MTPNetworker) {
+    indexOfAndSplice(this.networkers, networker);
+  }
 
   public setUpdatesProcessor(callback: (obj: any) => void) {
     this.updatesProcessor = callback;
   }
 
-  public getNetworker(dcId: number, authKey: number[], authKeyID: Uint8Array, serverSalt: number[], transport: MTTransport, options: InvokeApiOptions) {
+  public getNetworker(dcId: number, authKey: Uint8Array, authKeyId: Uint8Array, serverSalt: Uint8Array, options: InvokeApiOptions) {
     //console.log('NetworkerFactory: creating new instance of MTPNetworker:', dcId, options);
-    const networker = new MTPNetworker(dcId, authKey, authKeyID, serverSalt, transport, options);
+    const networker = new MTPNetworker(dcId, authKey, authKeyId, serverSalt, options);
     this.networkers.push(networker);
     return networker;
   }
@@ -46,6 +55,38 @@ export class NetworkerFactory {
   public stopAll() {
     this.akStopped = true;
   }
+
+  public setLanguage(langCode: string) {
+    this.language = langCode;
+    for(const networker of this.networkers) {
+      if(!networker.isFileNetworker) {
+        networker.connectionInited = false;
+      }
+    }
+  }
+
+  public unsetConnectionInited() {
+    for(const networker of this.networkers) {
+      networker.connectionInited = false;
+    }
+  }
+
+  public forceReconnectTimeout() {
+    for(const networker of this.networkers) {
+      networker.forceReconnectTimeout();
+    }
+  }
+
+  public forceReconnect() {
+    for(const networker of this.networkers) {
+      if(!networker.isFileNetworker) {
+        networker.forceReconnect();
+        break;
+      }
+    }
+  }
 }
 
-export default new NetworkerFactory();
+const networkerFactory = new NetworkerFactory();
+MOUNT_CLASS_TO && (MOUNT_CLASS_TO.networkerFactory = networkerFactory);
+export default networkerFactory;

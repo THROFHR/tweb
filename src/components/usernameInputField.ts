@@ -5,7 +5,7 @@
  */
 
 import ListenerSetter from "../helpers/listenerSetter";
-import { debounce } from "../helpers/schedulers";
+import debounce from "../helpers/schedulers/debounce";
 import appChatsManager from "../lib/appManagers/appChatsManager";
 import { LangPackKey } from "../lib/langPack";
 import apiManager from "../lib/mtproto/mtprotoworker";
@@ -16,7 +16,7 @@ export class UsernameInputField extends InputField {
   private checkUsernamePromise: Promise<any>;
   private checkUsernameDebounced: (username: string) => void;
   public options: InputFieldOptions & {
-    peerId: number,
+    peerId?: PeerId,
     listenerSetter: ListenerSetter,
     onChange?: () => void,
     invalidText: LangPackKey,
@@ -30,7 +30,7 @@ export class UsernameInputField extends InputField {
 
     this.checkUsernameDebounced = debounce(this.checkUsername.bind(this), 150, false, true);
 
-    options.listenerSetter.add(this.input, 'input', () => {
+    options.listenerSetter.add(this.input)('input', () => {
       const value = this.getValue();
 
       //console.log('userNameInput:', value);
@@ -68,7 +68,7 @@ export class UsernameInputField extends InputField {
 
     if(this.options.peerId) {
       this.checkUsernamePromise = apiManager.invokeApi('channels.checkUsername', {
-        channel: appChatsManager.getChannelInput(-this.options.peerId),
+        channel: appChatsManager.getChannelInput(this.options.peerId.toChatId()),
         username
       });
     } else {
@@ -97,7 +97,7 @@ export class UsernameInputField extends InputField {
       this.options.onChange && this.options.onChange();
 
       const value = this.getValue();
-      if(value !== username && this.isValid() && RichTextProcessor.isUsernameValid(value)) {
+      if(value !== username && this.isValidToChange() && RichTextProcessor.isUsernameValid(value)) {
         this.checkUsername(value);
       }
     });

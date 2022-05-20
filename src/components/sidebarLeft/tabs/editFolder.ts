@@ -4,10 +4,9 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { deepEqual, copy } from "../../../helpers/object";
 import appDialogsManager from "../../../lib/appManagers/appDialogsManager";
 import { MyDialogFilter as DialogFilter } from "../../../lib/storages/filters";
-import lottieLoader, { RLottiePlayer } from "../../../lib/lottieLoader";
+import lottieLoader, { LottieLoader } from "../../../lib/rlottie/lottieLoader";
 import { SliderSuperTab } from "../../slider";
 import { toast } from "../../toast";
 import appMessagesManager from "../../../lib/appManagers/appMessagesManager";
@@ -20,6 +19,13 @@ import Button from "../../button";
 import AppIncludedChatsTab from "./includedChats";
 import { i18n, i18n_, LangPackKey } from "../../../lib/langPack";
 import { SettingSection } from "..";
+import PopupPeer from "../../popups/peer";
+import RLottiePlayer from "../../../lib/rlottie/rlottiePlayer";
+import copy from "../../../helpers/object/copy";
+import deepEqual from "../../../helpers/object/deepEqual";
+import appUsersManager from "../../../lib/appManagers/appUsersManager";
+import forEachReverse from "../../../helpers/array/forEachReverse";
+import documentFragmentToHTML from "../../../helpers/dom/documentFragmentToHTML";
 
 const MAX_FOLDER_NAME_LENGTH = 12;
 
@@ -31,8 +37,8 @@ export default class AppEditFolderTab extends SliderSuperTab {
   private menuBtn: HTMLElement;
   private nameInputField: InputField;
 
-  private include_peers: SettingSection;
-  private exclude_peers: SettingSection;
+  private includePeerIds: SettingSection;
+  private excludePeerIds: SettingSection;
   private flags: {[k in 'contacts' | 'non_contacts' | 'groups' | 'broadcasts' | 'bots' | 'exclude_muted' | 'exclude_archived' | 'exclude_read']: HTMLElement} = {} as any;
 
   private animation: RLottiePlayer;
@@ -40,7 +46,7 @@ export default class AppEditFolderTab extends SliderSuperTab {
   private originalFilter: DialogFilter;
 
   private type: 'edit' | 'create';
-  private loadAnimationPromise: Promise<void>;
+  private loadAnimationPromise: ReturnType<LottieLoader['waitForFirstFrame']>;
 
   protected init() {
     this.container.classList.add('edit-folder-container');
@@ -55,14 +61,24 @@ export default class AppEditFolderTab extends SliderSuperTab {
       icon: 'delete danger',
       text: 'FilterMenuDelete',
       onClick: () => {
-        deleteFolderButton.element.setAttribute('disabled', 'true');
-        appMessagesManager.filtersStorage.updateDialogFilter(this.filter, true).then(bool => {
-          if(bool) {
-            this.close();
-          }
-        }).finally(() => {
-          deleteFolderButton.element.removeAttribute('disabled');
-        });
+        new PopupPeer('filter-delete', {
+          titleLangKey: 'ChatList.Filter.Confirm.Remove.Header',
+          descriptionLangKey: 'ChatList.Filter.Confirm.Remove.Text',
+          buttons: [{
+            langKey: 'Delete',
+            callback: () => {
+              deleteFolderButton.element.setAttribute('disabled', 'true');
+              appMessagesManager.filtersStorage.updateDialogFilter(this.filter, true).then(bool => {
+                if(bool) {
+                  this.close();
+                }
+              }).finally(() => {
+                deleteFolderButton.element.removeAttribute('disabled');
+              });
+            },
+            isDanger: true
+          }]
+        }).show();
       }
     };
     this.menuBtn = ButtonMenuToggle({}, 'bottom-left', [deleteFolderButton]);
@@ -70,15 +86,18 @@ export default class AppEditFolderTab extends SliderSuperTab {
 
     this.header.append(this.confirmBtn, this.menuBtn);
 
+    const inputSection = new SettingSection({});
+
     const inputWrapper = document.createElement('div');
     inputWrapper.classList.add('input-wrapper');
     
     this.nameInputField = new InputField({
-      label: 'FilterNameInputLabel',
+      label: 'FilterNameHint',
       maxLength: MAX_FOLDER_NAME_LENGTH
     });
 
     inputWrapper.append(this.nameInputField.container);
+    inputSection.content.append(inputWrapper);
 
     const generateList = (className: string, h2Text: LangPackKey, buttons: {icon: string, name?: string, withRipple?: true, text: LangPackKey}[], to: any) => {
       const section = new SettingSection({
@@ -108,7 +127,7 @@ export default class AppEditFolderTab extends SliderSuperTab {
       return section;
     };
 
-    this.include_peers = generateList('folder-list-included', 'FilterInclude', [{
+    this.includePeerIds = generateList('folder-list-included', 'FilterInclude', [{
       icon: 'add primary',
       text: 'ChatList.Filter.Include.AddChat',
       withRipple: true
@@ -134,7 +153,7 @@ export default class AppEditFolderTab extends SliderSuperTab {
       name: 'bots'
     }], this.flags);
 
-    this.exclude_peers = generateList('folder-list-excluded', 'FilterExclude', [{
+    this.excludePeerIds = generateList('folder-list-excluded', 'FilterExclude', [{
       icon: 'minus primary',
       text: 'ChatList.Filter.Exclude.AddChat',
       withRipple: true
@@ -152,10 +171,10 @@ export default class AppEditFolderTab extends SliderSuperTab {
       name: 'exclude_read'
     }], this.flags);
 
-    this.scrollable.append(this.stickerContainer, this.caption, inputWrapper, this.include_peers.container, this.exclude_peers.container);
+    this.scrollable.append(this.stickerContainer, this.caption, inputSection.container, this.includePeerIds.container, this.excludePeerIds.container);
 
-    const includedFlagsContainer = this.include_peers.container.querySelector('.folder-categories');
-    const excludedFlagsContainer = this.exclude_peers.container.querySelector('.folder-categories');
+    const includedFlagsContainer = this.includePeerIds.container.querySelector('.folder-categories');
+    const excludedFlagsContainer = this.excludePeerIds.container.querySelector('.folder-categories');
 
     includedFlagsContainer.querySelector('.btn').addEventListener('click', () => {
       new AppIncludedChatsTab(this.slider).open(this.filter, 'included', this);
@@ -212,17 +231,27 @@ export default class AppEditFolderTab extends SliderSuperTab {
       this.editCheckForChange();
     });
 
-    return this.loadAnimationPromise = lottieLoader.loadAnimationFromURL({
-      container: this.stickerContainer,
-      loop: false,
-      autoplay: false,
-      width: 86,
-      height: 86
-    }, 'assets/img/Folders_2.tgs').then(player => {
-      this.animation = player;
+    const reloadMissingPromises: Promise<any>[] = this.type === 'edit' ? [
+      appMessagesManager.filtersStorage.reloadMissingPeerIds(this.filter.id, 'pinned_peers'),
+      appMessagesManager.filtersStorage.reloadMissingPeerIds(this.filter.id, 'include_peers'),
+      appMessagesManager.filtersStorage.reloadMissingPeerIds(this.filter.id, 'exclude_peers')
+    ] : [];
 
-      return lottieLoader.waitForFirstFrame(player);
-    });
+    return Promise.all([
+      this.loadAnimationPromise = lottieLoader.loadAnimationAsAsset({
+        container: this.stickerContainer,
+        loop: false,
+        autoplay: false,
+        width: 86,
+        height: 86
+      }, 'Folders_2').then(player => {
+        this.animation = player;
+
+        return lottieLoader.waitForFirstFrame(player);
+      }),
+
+      ...reloadMissingPromises
+    ]);
   }
 
   onOpenAfterTimeout() {
@@ -233,7 +262,7 @@ export default class AppEditFolderTab extends SliderSuperTab {
   }
 
   private onCreateOpen() {
-    this.caption.style.display = '';
+    // this.caption.style.display = '';
     this.setTitle('FilterNew');
     this.menuBtn.classList.add('hide');
     this.confirmBtn.classList.remove('hide');
@@ -246,7 +275,7 @@ export default class AppEditFolderTab extends SliderSuperTab {
   }
 
   private onEditOpen() {
-    this.caption.style.display = 'none';
+    // this.caption.style.display = 'none';
     this.setTitle(this.type === 'create' ? 'FilterNew' : 'FilterHeaderEdit');
 
     if(this.type === 'edit') {
@@ -255,21 +284,37 @@ export default class AppEditFolderTab extends SliderSuperTab {
     }
     
     const filter = this.filter;
-    this.nameInputField.value = RichTextProcessor.wrapDraftText(filter.title);
+    this.nameInputField.value = documentFragmentToHTML(RichTextProcessor.wrapDraftText(filter.title));
 
     for(const flag in this.flags) {
       this.flags[flag as keyof AppEditFolderTab['flags']].style.display = !!filter.pFlags[flag as keyof AppEditFolderTab['flags']] ? '' : 'none';
     }
 
-    (['include_peers', 'exclude_peers'] as ['include_peers', 'exclude_peers']).forEach(key => {
+    (['includePeerIds' as const, 'excludePeerIds' as const]).forEach(key => {
       const section = this[key];
       const ul = appDialogsManager.createChatList();
 
-      const peers = filter[key].slice();
+      let peers = filter[key];
+
+      // filter peers where we're kicked
+      const hasPeer = (peerId: PeerId) => {
+        return !!appMessagesManager.getDialogOnly(peerId) || (peerId.isUser() ? appUsersManager.getUser(peerId.toUserId())._ === 'user' : false);
+      };
+      
+      forEachReverse(peers, (peerId, idx, arr) => {
+        if(!hasPeer(peerId)) {
+          arr.splice(idx, 1);
+        }
+      });
+
+      peers = peers.slice();
 
       const renderMore = (_length: number) => {
         for(let i = 0, length = Math.min(peers.length, _length); i < length; ++i) {
           const peerId = peers.shift();
+          if(peerId.isUser() ? false : !appMessagesManager.getDialogOnly(peerId)) {
+            continue;
+          }
 
           const {dom} = appDialogsManager.addDialogNew({
             dialog: peerId,
@@ -315,8 +360,10 @@ export default class AppEditFolderTab extends SliderSuperTab {
   };
 
   setFilter(filter: DialogFilter, firstTime: boolean) {
-    // cleanup
-    Array.from(this.container.querySelectorAll('ul, .load-more')).forEach(el => el.remove());
+    if(this.container) {
+      // cleanup
+      Array.from(this.container.querySelectorAll('ul, .load-more')).forEach(el => el.remove());
+    }
 
     if(firstTime) {
       this.originalFilter = filter;
@@ -329,8 +376,6 @@ export default class AppEditFolderTab extends SliderSuperTab {
   }
 
   public open(filter?: DialogFilter) {
-    const ret = super.open();
-    
     if(filter === undefined) {
       this.setFilter({
         _: 'dialogFilter',
@@ -339,16 +384,24 @@ export default class AppEditFolderTab extends SliderSuperTab {
         pFlags: {},
         pinned_peers: [],
         include_peers: [],
-        exclude_peers: []
+        exclude_peers: [],
+        pinnedPeerIds: [],
+        includePeerIds: [],
+        excludePeerIds: []
       }, true);
       this.type = 'create';
-      this.onCreateOpen();
     } else {
       this.setFilter(filter, true);
       this.type = 'edit';
-      this.onEditOpen();
     }
 
-    return ret;
+    return super.open().then(() => {
+      if(this.type === 'edit') {
+        this.setFilter(this.originalFilter, true);
+        this.onEditOpen();
+      } else {
+        this.onCreateOpen();
+      }
+    });
   }
 }

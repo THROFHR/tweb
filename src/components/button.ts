@@ -5,9 +5,9 @@
  */
 
 import { i18n, LangPackKey } from "../lib/langPack";
-import { ripple } from "./ripple";
+import ripple from "./ripple";
 
-const Button = (className: string, options: Partial<{
+export type ButtonOptions = Partial<{
   noRipple: true, 
   onlyMobile: true, 
   icon: string, 
@@ -15,7 +15,9 @@ const Button = (className: string, options: Partial<{
   text: LangPackKey, 
   disabled: boolean,
   asDiv: boolean
-}> = {}) => {
+}>;
+
+const Button = (className: string, options: ButtonOptions = {}) => {
   const button: HTMLButtonElement = document.createElement(options.asDiv ? 'div' : 'button') as any;
   button.className = className + (options.icon ? ' tgico-' + options.icon : '');
 

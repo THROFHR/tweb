@@ -14,15 +14,21 @@ import appDocsManager from "./appDocsManager";
 import { RichTextProcessor } from "../richtextprocessor";
 import { ReferenceContext } from "../mtproto/referenceDatabase";
 import rootScope from "../rootScope";
-import { safeReplaceObject } from "../../helpers/object";
-import { limitSymbols } from "../../helpers/string";
+import { WebPage } from "../../layer";
+import { MOUNT_CLASS_TO } from "../../config/debug";
+import safeReplaceObject from "../../helpers/object/safeReplaceObject";
+import limitSymbols from "../../helpers/string/limitSymbols";
+
+const photoTypeSet = new Set(['photo', 'video', 'gif', 'document']);
+
+type WebPageMessageKey = `${PeerId}_${number}`;
 
 export class AppWebPagesManager {
-  private webpages: any = {};
+  private webpages: {
+    [webPageId: string]: WebPage
+  } = {};
   private pendingWebPages: {
-    [webPageId: string]: {
-      [mid: string]: true
-    }
+    [webPageId: string]: Set<WebPageMessageKey>
   } = {};
   
   constructor() {
@@ -33,79 +39,72 @@ export class AppWebPagesManager {
     });
   }
   
-  public saveWebPage(apiWebPage: any, mid?: number, mediaContext?: ReferenceContext) {
-    if(apiWebPage.photo && apiWebPage.photo._ === 'photo') {
-      //appPhotosManager.savePhoto(apiWebPage.photo, mediaContext);
-      apiWebPage.photo = appPhotosManager.savePhoto(apiWebPage.photo, mediaContext);
+  public saveWebPage(apiWebPage: WebPage, messageKey?: WebPageMessageKey, mediaContext?: ReferenceContext) {
+    if(apiWebPage._ === 'webPageNotModified') return;
+    const {id} = apiWebPage;
+
+    const oldWebPage = this.webpages[id];
+    const isUpdated = oldWebPage && 
+      oldWebPage._ === apiWebPage._ && 
+      (oldWebPage as WebPage.webPage).hash === (oldWebPage as WebPage.webPage).hash;
+
+    if(apiWebPage._ === 'webPage') {
+      if(apiWebPage.photo?._ === 'photo') {
+        apiWebPage.photo = appPhotosManager.savePhoto(apiWebPage.photo, mediaContext);
+      } else {
+        delete apiWebPage.photo;
+      }
+  
+      if(apiWebPage.document?._ === 'document') {
+        apiWebPage.document = appDocsManager.saveDoc(apiWebPage.document, mediaContext);
+      } else {
+        if(apiWebPage.type === 'document') {
+          delete apiWebPage.type;
+        }
+  
+        delete apiWebPage.document;
+      }
+
+      const siteName = apiWebPage.site_name;
+      let shortTitle = apiWebPage.title || apiWebPage.author || siteName || '';
+      if(siteName && shortTitle === siteName) {
+        delete apiWebPage.site_name;
+      }
+
+      // delete apiWebPage.description
+
+      if(!photoTypeSet.has(apiWebPage.type) &&
+        !apiWebPage.description &&
+        apiWebPage.photo) {
+        apiWebPage.type = 'photo';
+      }
+    }
+    
+    let pendingSet = this.pendingWebPages[id];
+    if(messageKey) {
+      if(!pendingSet) pendingSet = this.pendingWebPages[id] = new Set();
+      pendingSet.add(messageKey);
+    }
+    
+    if(oldWebPage === undefined) {
+      this.webpages[id] = apiWebPage;
     } else {
-      delete apiWebPage.photo;
-    }
-
-    if(apiWebPage.document && apiWebPage.document._ === 'document') {
-      apiWebPage.document = appDocsManager.saveDoc(apiWebPage.document, mediaContext); // warning 11.04.2020
-    } else {
-      if(apiWebPage.type === 'document') {
-        delete apiWebPage.type;
-      }
-
-      delete apiWebPage.document;
+      safeReplaceObject(oldWebPage, apiWebPage);
     }
     
-    const siteName = apiWebPage.site_name;
-    let shortTitle = apiWebPage.title || apiWebPage.author || siteName || '';
-    if(siteName && shortTitle === siteName) {
-      delete apiWebPage.site_name;
-    }
+    if(!messageKey && pendingSet !== undefined && isUpdated) {
+      const msgs: {peerId: PeerId, mid: number, isScheduled: boolean}[] = [];
+      pendingSet.forEach((value) => {
+        const [peerId, mid, isScheduled] = value.split('_');
+        msgs.push({
+          peerId: peerId.toPeerId(), 
+          mid: +mid, 
+          isScheduled: !!isScheduled
+        });
+      });
 
-    shortTitle = limitSymbols(shortTitle, 80, 100);
-
-    apiWebPage.rTitle = RichTextProcessor.wrapRichText(shortTitle, {noLinks: true, noLinebreaks: true});
-    let contextHashtag = '';
-    if(siteName === 'GitHub') {
-      const matches = apiWebPage.url.match(/(https?:\/\/github\.com\/[^\/]+\/[^\/]+)/);
-      if(matches) {
-        contextHashtag = matches[0] + '/issues/{1}';
-      }
-    }
-
-    // delete apiWebPage.description
-    const shortDescriptionText = limitSymbols(apiWebPage.description || '', 150, 180);
-    apiWebPage.rDescription = RichTextProcessor.wrapRichText(shortDescriptionText, {
-      contextSite: siteName || 'external',
-      contextHashtag: contextHashtag
-    });
-    
-    if(apiWebPage.type !== 'photo' &&
-      apiWebPage.type !== 'video' &&
-      apiWebPage.type !== 'gif' &&
-      apiWebPage.type !== 'document' &&
-      !apiWebPage.description &&
-      apiWebPage.photo) {
-      apiWebPage.type = 'photo';
-    }
-    
-    if(mid) {
-      if(this.pendingWebPages[apiWebPage.id] === undefined) {
-        this.pendingWebPages[apiWebPage.id] = {};
-      }
-
-      this.pendingWebPages[apiWebPage.id][mid] = true;
-    }
-    
-    if(this.webpages[apiWebPage.id] === undefined) {
-      this.webpages[apiWebPage.id] = apiWebPage;
-    } else {
-      safeReplaceObject(this.webpages[apiWebPage.id], apiWebPage);
-    }
-    
-    if(!mid && this.pendingWebPages[apiWebPage.id] !== undefined) {
-      const msgs: number[] = [];
-      for(const msgId in this.pendingWebPages[apiWebPage.id]) {
-        msgs.push(+msgId);
-      }
-
-      rootScope.broadcast('webpage_updated', {
-        id: apiWebPage.id,
+      rootScope.dispatchEvent('webpage_updated', {
+        id,
         msgs
       });
     }
@@ -113,20 +112,51 @@ export class AppWebPagesManager {
     return apiWebPage;
   }
 
-  public deleteWebPageFromPending(webPage: any, mid: number) {
-    const id = webPage.id;
-    if(this.pendingWebPages[id] && this.pendingWebPages[id][mid]) {
-      delete this.pendingWebPages[id][mid];
+  public wrapTitle(webPage: WebPage.webPage) {
+    let shortTitle = webPage.title || webPage.author || webPage.site_name || '';
+    shortTitle = limitSymbols(shortTitle, 80, 100);
+    return RichTextProcessor.wrapRichText(shortTitle, {noLinks: true, noLinebreaks: true});
+  }
 
-      if(!Object.keys(this.pendingWebPages[id]).length) {
+  public wrapDescription(webPage: WebPage.webPage) {
+    const shortDescriptionText = limitSymbols(webPage.description || '', 150, 180);
+    // const siteName = webPage.site_name;
+    // let contextHashtag = '';
+    // if(siteName === 'GitHub') {
+    //   const matches = apiWebPage.url.match(/(https?:\/\/github\.com\/[^\/]+\/[^\/]+)/);
+    //   if(matches) {
+    //     contextHashtag = matches[0] + '/issues/{1}';
+    //   }
+    // }
+    return RichTextProcessor.wrapRichText(shortDescriptionText/* , {
+      contextSite: siteName || 'external',
+      contextHashtag: contextHashtag
+    } */);
+  }
+
+  public getMessageKeyForPendingWebPage(peerId: PeerId, mid: number, isScheduled?: boolean): WebPageMessageKey {
+    return peerId + '_' + mid + (isScheduled ? '_s' : '') as any;
+  }
+
+  public deleteWebPageFromPending(webPage: WebPage, messageKey: WebPageMessageKey) {
+    const id = (webPage as WebPage.webPage).id;
+    if(!id) return;
+
+    const set = this.pendingWebPages[id];
+    if(set && set.has(messageKey)) {
+      set.delete(messageKey);
+
+      if(!set.size) {
         delete this.pendingWebPages[id];
       }
     }
   }
 
-  public getWebPage(id: string) {
+  public getWebPage(id: WebPage.webPage['id']) {
     return this.webpages[id];
   }
 }
 
-export default new AppWebPagesManager();
+const appWebPagesManager = new AppWebPagesManager();
+MOUNT_CLASS_TO && (MOUNT_CLASS_TO.appWebPagesManager = appWebPagesManager);
+export default appWebPagesManager;

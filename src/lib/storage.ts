@@ -9,20 +9,40 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import { DatabaseStore, DatabaseStoreName } from "../config/database";
-import { CancellablePromise, deferredPromise } from "../helpers/cancellablePromise";
-import { throttle } from "../helpers/schedulers";
-import IDBStorage, { IDBOptions } from "./idb";
+import { Database } from "../config/databases";
+//import DATABASE_SESSION from "../config/databases/session";
+import deferredPromise, { CancellablePromise } from "../helpers/cancellablePromise";
+import throttle from "../helpers/schedulers/throttle";
+//import { WorkerTaskTemplate } from "../types";
+import IDBStorage from "./idb";
 
 function noop() {}
 
-export default class AppStorage<Storage extends Record<string, any>/* Storage extends {[name: string]: any} *//* Storage extends Record<string, any> */> {
-  private static STORAGES: AppStorage<any>[] = [];
-  private storage: IDBStorage;//new CacheStorageController('session');
+/* export interface LocalStorageProxySetTask extends WorkerTaskTemplate {
+  type: 'localStorageProxy',
+  payload: {
+    type: 'set',
+    keys: string[],
+    values: any[]
+  }
+};
+
+export interface LocalStorageProxyDeleteTask extends WorkerTaskTemplate {
+  type: 'localStorageProxy',
+  payload: {
+    type: 'delete',
+    keys: string[]
+  }
+}; */
+
+export default class AppStorage<Storage extends Record<string, any>, T extends Database<any>/* Storage extends {[name: string]: any} *//* Storage extends Record<string, any> */> {
+  private static STORAGES: AppStorage<any, Database<any>>[] = [];
+  private storage: IDBStorage<T>;//new CacheStorageController('session');
 
   //private cache: Partial<{[key: string]: Storage[typeof key]}> = {};
   private cache: Partial<Storage> = {};
-  private useStorage = true;
+  private useStorage: boolean;
+  private savingFreezed: boolean;
 
   private getPromises: Map<keyof Storage, CancellablePromise<Storage[keyof Storage]>> = new Map();
   private getThrottled: () => void;
@@ -35,8 +55,16 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
   private deleteThrottled: () => void;
   private deleteDeferred = deferredPromise<void>();
 
-  constructor(storageOptions: Omit<IDBOptions, 'storeName' | 'stores'> & {stores?: DatabaseStore[], storeName: DatabaseStoreName}) {
-    this.storage = new IDBStorage(storageOptions);
+  constructor(private db: T, private storeName: typeof db['stores'][number]['name']) {
+    this.storage = new IDBStorage<T>(db, storeName);
+
+    if(AppStorage.STORAGES.length) {
+      this.useStorage = AppStorage.STORAGES[0].useStorage;
+    } else {
+      this.useStorage = true;
+    }
+
+    this.savingFreezed = false;
 
     AppStorage.STORAGES.push(this);
 
@@ -53,7 +81,20 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
           //console.log('setItem: will set', key/* , value */);
           //await this.cacheStorage.delete(key); // * try to prevent memory leak in Chrome leading to 'Unexpected internal error.'
           //await this.storage.save(key, new Response(value, {headers: {'Content-Type': 'application/json'}}));
-          await this.storage.save(keys, keys.map(key => this.cache[key]));
+
+          const values = keys.map(key => this.cache[key]);
+          /* if(db === DATABASE_SESSION && !('localStorage' in self)) { // * support legacy Webogram's localStorage
+            self.postMessage({
+              type: 'localStorageProxy', 
+              payload: {
+                type: 'set',
+                keys,
+                values
+              }
+            } as LocalStorageProxySetTask);
+          } */
+
+          await this.storage.save(keys, values);
           //console.log('setItem: have set', key/* , value */);
         } catch(e) {
           //this.useCS = false;
@@ -78,6 +119,16 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
         set.clear();
 
         try {
+          /* if(db === DATABASE_SESSION && !('localStorage' in self)) { // * support legacy Webogram's localStorage
+            self.postMessage({
+              type: 'localStorageProxy', 
+              payload: {
+                type: 'delete',
+                keys
+              }
+            } as LocalStorageProxyDeleteTask);
+          } */
+
           await this.storage.delete(keys);
         } catch(e) {
           console.error('[AS]: delete error:', e, keys);
@@ -94,6 +145,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
     this.getThrottled = throttle(async() => {
       const keys = Array.from(this.getPromises.keys());
 
+      // const perf = performance.now();
       this.storage.get(keys as string[]).then(values => {
         for(let i = 0, length = keys.length; i < length; ++i) {
           const key = keys[i];
@@ -104,10 +156,12 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
             this.getPromises.delete(key);
           }
         }
+
+        // console.log('[AS]: get time', keys, performance.now() - perf);
       }, (error) => {
         if(!['NO_ENTRY_FOUND', 'STORAGE_OFFLINE'].includes(error)) {
           this.useStorage = false;
-          console.error('[AS]: get error:', error, keys, storageOptions.storeName);
+          console.error('[AS]: get error:', error, keys, storeName);
         }
 
         for(let i = 0, length = keys.length; i < length; ++i) {
@@ -115,7 +169,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
           const deferred = this.getPromises.get(key);
           if(deferred) {
             //deferred.reject(error);
-            deferred.resolve();
+            deferred.resolve(undefined);
             this.getPromises.delete(key);
           }
         }
@@ -135,7 +189,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
     return this.cache;
   }
 
-  public getFromCache(key: keyof Storage) {
+  public getFromCache<T extends keyof Storage>(key: T) {
     return this.cache[key];
   }
 
@@ -143,15 +197,15 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
     return this.cache[key] = value;
   }
 
-  public async get(key: keyof Storage, useCache = true): Promise<Storage[typeof key]> {
+  public async get<T extends keyof Storage>(key: T, useCache = true): Promise<Storage[T]> {
     if(this.cache.hasOwnProperty(key) && useCache) {
       return this.getFromCache(key);
     } else if(this.useStorage) {
       const r = this.getPromises.get(key);
-      if(r) return r;
+      if(r) return r as any;
 
-      const p = deferredPromise<Storage[typeof key]>();
-      this.getPromises.set(key, p);
+      const p = deferredPromise<Storage[T]>();
+      this.getPromises.set(key, p as any);
 
       this.getThrottled();
 
@@ -168,6 +222,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
   public set(obj: Partial<Storage>, onlyLocal = false) {
     //console.log('storageSetValue', obj, callback, arguments);
 
+    const canUseStorage = this.useStorage && !onlyLocal && !this.savingFreezed;
     for(const key in obj) {
       if(obj.hasOwnProperty(key)) {
         const value = obj[key];
@@ -187,7 +242,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
         value = stringify(value);
         console.log('LocalStorage set: stringify time by own stringify:', performance.now() - perf); */
 
-        if(this.useStorage && !onlyLocal) {
+        if(canUseStorage) {
           this.keysToSet.add(key);
           this.keysToDelete.delete(key);
           this.saveThrottled();
@@ -195,7 +250,7 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
       }
     }
 
-    return this.useStorage ? this.saveDeferred : Promise.resolve();
+    return canUseStorage ? this.saveDeferred : Promise.resolve();
   }
 
   public delete(key: keyof Storage, saveLocal = false) {
@@ -219,8 +274,14 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
     return this.useStorage ? this.deleteDeferred : Promise.resolve();
   }
 
-  public clear() {
-    return this.storage.deleteAll().catch(noop);
+  public clear(saveLocal = false) {
+    if(!saveLocal) {
+      for(const i in this.cache) {
+        delete this.cache[i];
+      }
+    }
+
+    return this.storage.clear().catch(noop);
   }
 
   public static toggleStorage(enabled: boolean) {
@@ -230,16 +291,24 @@ export default class AppStorage<Storage extends Record<string, any>/* Storage ex
       if(!enabled) {
         storage.keysToSet.clear();
         storage.keysToDelete.clear();
-        storage.getPromises.forEach((deferred) => deferred.resolve());
+        storage.getPromises.forEach((deferred) => deferred.resolve(undefined));
         storage.getPromises.clear();
-        return storage.clear();
+        return storage.clear(true);
       } else {
         return storage.set(storage.cache);
       }
     })).catch(noop);
   }
 
-  public deleteDatabase() {
-    return IDBStorage.deleteDatabase().catch(noop);
+  public static freezeSaving<T extends Database<any>>(callback: () => any, names: T['stores'][number]['name'][]) {
+    this.STORAGES.forEach(storage => storage.savingFreezed = true);
+    try {
+      callback();
+    } catch(err) {}
+    this.STORAGES.forEach(storage => storage.savingFreezed = false);
   }
+
+  /* public deleteDatabase() {
+    return IDBStorage.deleteDatabase().catch(noop);
+  } */
 }

@@ -5,7 +5,7 @@
  */
 
 import Page from "./page";
-import lottieLoader from "../lib/lottieLoader";
+import lottieLoader from "../lib/rlottie/lottieLoader";
 import { horizontalMenu } from "../components/horizontalMenu";
 import { MOUNT_CLASS_TO } from "../config/debug";
 import fastSmoothScroll from "../helpers/fastSmoothScroll";
@@ -47,7 +47,11 @@ class PagesManager {
       this.pageId = id;
 
       if(this.scrollableDiv) {
-        fastSmoothScroll(this.scrollableDiv, this.scrollableDiv.firstElementChild as HTMLElement, 'start');
+        fastSmoothScroll({
+          container: this.scrollableDiv, 
+          element: this.scrollableDiv.firstElementChild as HTMLElement, 
+          position: 'start'
+        });
       }
     } else {
       this.pagesDiv.style.display = 'none';

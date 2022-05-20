@@ -22,6 +22,10 @@ export interface SliderSuperTabConstructable {
   new(slider: SidebarSlider, destroyable: boolean): SliderSuperTab;
 }
 
+export interface SliderSuperTabEventableConstructable {
+  new(slider: SidebarSlider, destroyable: boolean): SliderSuperTabEventable;
+}
+
 export default class SliderSuperTab implements SliderTab {
   public container: HTMLElement;
 
@@ -45,7 +49,7 @@ export default class SliderSuperTab implements SliderTab {
     this.destroyable = destroyable;
 
     this.container = document.createElement('div');
-    this.container.classList.add('sidebar-slider-item');
+    this.container.classList.add('tabs-tab', 'sidebar-slider-item');
 
     // * Header
     this.header = document.createElement('div');
@@ -87,7 +91,7 @@ export default class SliderSuperTab implements SliderTab {
       }
     }
 
-    return this.slider.selectTab(this);
+    this.slider.selectTab(this);
   }
 
   protected init(): Promise<any> | any {

@@ -20,6 +20,13 @@
   display: flex;
   flex-direction: column;
 
+  .selector-search-section {
+    padding: 0 !important;
+    margin-bottom: 0 !important;
+    position: relative;
+    z-index: 1;
+  }
+
   &-search-container {
     flex: 0 0 auto;
     //flex: 1 1 auto;
@@ -34,7 +41,8 @@
   }
 
   &-search {
-    padding: 0 24px 0 24px;
+    // padding: 0 1.5rem;
+    padding: 0 1rem;
     display: flex;
     flex-flow: wrap;
     position: relative;
@@ -54,18 +62,18 @@
   &-user {
     color: var(--primary-text-color);
     background-color: var(--light-secondary-text-color);
-    font-size: 16px;
+    font-size: 1rem;
     padding: 0 17px 0px 0px;
-    line-height: 31px;
-    margin-left: -4px;
-    margin-right: 12px;
-    height: 32px;
+    margin-left: -.25rem;
+    margin-right: .75rem;
+    height: 2rem;
+    line-height: 2rem;
     margin-bottom: 7px;
-    border-radius: 24px;
+    border-radius: 1.5rem;
     user-select: none;
     flex: 0 0 auto;
     transition: .2s opacity, .2s transform, .2s background-color;
-    max-width: 10rem;
+    max-width: 11.25rem;
 
     @include text-overflow();
 
@@ -130,13 +138,13 @@
     height: 100%;
     flex: 1 1 auto;
 
-    .scrollable > :first-child {
+    /* .scrollable > :first-child {
       margin-top: .5rem;
-    }
+    } */
   }
 
   .chatlist {
-    li {
+    &-chat {
       padding-top: .75rem;
       padding-bottom: .75rem;
 
@@ -176,6 +184,7 @@
     padding: 0;
     transform: translateY(-50%);
     top: 50%;
+    z-index: 1;
 
     &:first-child {
       margin-right: 1.6875rem;

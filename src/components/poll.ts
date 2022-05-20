@@ -5,25 +5,30 @@
  */
 
 import mediaSizes from "../helpers/mediaSizes";
-import { isTouchSupported } from "../helpers/touchSupport";
+import { IS_TOUCH_SUPPORTED } from "../environment/touchSupport";
 import appImManager from "../lib/appManagers/appImManager";
-import appPollsManager, { Poll, PollResults } from "../lib/appManagers/appPollsManager";
+import appPollsManager from "../lib/appManagers/appPollsManager";
 import serverTimeManager from "../lib/mtproto/serverTimeManager";
 import { RichTextProcessor } from "../lib/richtextprocessor";
 import rootScope from "../lib/rootScope";
-import { ripple } from "./ripple";
+import ripple from "./ripple";
 import appSidebarRight from "./sidebarRight";
 import AppPollResultsTab from "./sidebarRight/tabs/pollResults";
 import { i18n, LangPackKey } from "../lib/langPack";
 import { fastRaf } from "../helpers/schedulers";
 import SetTransition from "./singleTransition";
 import findUpClassName from "../helpers/dom/findUpClassName";
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { attachClickEvent, detachClickEvent } from "../helpers/dom/clickEvent";
 import replaceContent from "../helpers/dom/replaceContent";
+import windowSize from "../helpers/windowSize";
+import { Poll, PollResults } from "../layer";
+import toHHMMSS from "../helpers/string/toHHMMSS";
+import StackedAvatars from "./stackedAvatars";
+import setInnerHTML from "../helpers/dom/setInnerHTML";
 
 let lineTotalLength = 0;
-//const tailLength = 9;
+const tailLength = 9;
 const times = 10;
 const fullTime = 340;
 const oneTime = fullTime / times;
@@ -91,9 +96,7 @@ rootScope.on('poll_update', (e) => {
   }
 }); */
 
-rootScope.on('poll_update', (e) => {
-  const {poll, results} = e as {poll: Poll, results: PollResults};
-
+rootScope.addEventListener('poll_update', ({poll, results}) => {
   const pollElements = Array.from(document.querySelectorAll(`poll-element[poll-id="${poll.id}"]`)) as PollElement[];
   pollElements.forEach(pollElement => {
     //console.log('poll_update', poll, results);
@@ -102,10 +105,19 @@ rootScope.on('poll_update', (e) => {
   });
 });
 
-rootScope.on('peer_changed', () => {
+rootScope.addEventListener('peer_changed', () => {
   if(prevQuizHint) {
     hideQuizHint(prevQuizHint, prevQuizHintOnHide, prevQuizHintTimeout);
   }
+});
+
+mediaSizes.addEventListener('resize', () => {
+  PollElement.setMaxLength();
+  PollElement.resizePolls();
+});
+
+mediaSizes.addEventListener('changeScreen', () => {
+  PollElement.setMaxLength();
 });
 
 const hideQuizHint = (element: HTMLElement, onHide: () => void, timeout: number) => {
@@ -141,7 +153,7 @@ const setQuizHint = (solution: string, solution_entities: any[], onHide: () => v
   container.append(textEl);
   element.append(container);
 
-  textEl.innerHTML = RichTextProcessor.wrapRichText(solution, {entities: solution_entities});
+  setInnerHTML(textEl, RichTextProcessor.wrapRichText(solution, {entities: solution_entities}));
   appImManager.chat.bubbles.bubblesContainer.append(element);
 
   void element.offsetLeft; // reflow
@@ -151,11 +163,13 @@ const setQuizHint = (solution: string, solution_entities: any[], onHide: () => v
   prevQuizHintOnHide = onHide;
   prevQuizHintTimeout = window.setTimeout(() => {
     hideQuizHint(element, onHide, prevQuizHintTimeout);
-  }, isTouchSupported ? 5000 : 7000);
+  }, IS_TOUCH_SUPPORTED ? 5000 : 7000);
 };
 
 export default class PollElement extends HTMLElement {
-  private svgLines: SVGSVGElement[];
+  public static MAX_OFFSET = -46.5;
+  public static MAX_LENGTH = 0;
+  public svgLines: SVGSVGElement[];
   private numberDivs: HTMLDivElement[];
   private answerDivs: HTMLDivElement[];
   private descDiv: HTMLElement;
@@ -164,9 +178,8 @@ export default class PollElement extends HTMLElement {
   private viewResults: HTMLElement;
   private votersCountDiv: HTMLDivElement;
 
-  private maxOffset = -46.5;
-  //private maxLength: number;
-  //private maxLengths: number[];
+  // private maxLength: number;
+  // private maxLengths: number[];
   private maxPercents: number[];
 
   public isClosed = false;
@@ -193,6 +206,22 @@ export default class PollElement extends HTMLElement {
     // элемент создан
   }
 
+  public static setMaxLength() {
+    const width = windowSize.width <= 360 ? windowSize.width - 120 : mediaSizes.active.poll.width;
+    this.MAX_LENGTH = width + tailLength + this.MAX_OFFSET + -13.7; // 13 - position left
+  }
+
+  public static resizePolls() {
+    if(!this.MAX_LENGTH) return;
+    const pollElements = Array.from(document.querySelectorAll('poll-element.is-voted')) as PollElement[];
+    pollElements.forEach(pollElement => {
+      pollElement.svgLines.forEach((svg, idx) => {
+        //void svg.getBoundingClientRect(); // reflow
+        pollElement.setLineProgress(idx, 1);
+      });
+    });
+  }
+
   public render() {
     // браузер вызывает этот метод при добавлении элемента в документ
     // (может вызываться много раз, если элемент многократно добавляется/удаляется)
@@ -200,6 +229,7 @@ export default class PollElement extends HTMLElement {
     if(!lineTotalLength) {
       lineTotalLength = (document.getElementById('poll-line') as any as SVGPathElement).getTotalLength();
       //console.log('line total length:', lineTotalLength);
+      PollElement.setMaxLength();
     }
 
     const pollId = this.message.media.poll.id;
@@ -230,6 +260,8 @@ export default class PollElement extends HTMLElement {
       }
     }
 
+    this.classList.toggle('is-multiple', this.isMultiple);
+
     const multipleSelect = this.isMultiple ? '<span class="poll-answer-selected tgico-check"></span>' : '';
     const votes = poll.answers.map((answer, idx) => {
       return `
@@ -242,8 +274,8 @@ export default class PollElement extends HTMLElement {
             ${multipleSelect}
           </div>
           <div class="poll-answer-percents"></div>
-          <div class="poll-answer-text">${RichTextProcessor.wrapEmojiText(answer.text)}</div>
-          <svg version="1.1" class="poll-line" style="display: none;" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${mediaSizes.active.regular.width} 35" xml:space="preserve">
+          <div class="poll-answer-text"></div>
+          <svg version="1.1" class="poll-line" style="display: none;" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 485.9 35" xml:space="preserve">
             <use href="#poll-line"></use>
           </svg>
           <span class="poll-answer-selected tgico"></span>
@@ -252,12 +284,18 @@ export default class PollElement extends HTMLElement {
     }).join('');
 
     this.innerHTML = `
-      <div class="poll-title">${poll.rQuestion}</div>
+      <div class="poll-title"></div>
       <div class="poll-desc">
         <div class="poll-type"></div>
         <div class="poll-avatars"></div>
       </div>
       ${votes}`;
+    
+    setInnerHTML(this.firstElementChild, RichTextProcessor.wrapEmojiText(poll.question));
+
+    Array.from(this.querySelectorAll('.poll-answer-text')).forEach((el, idx) => {
+      setInnerHTML(el, RichTextProcessor.wrapEmojiText(poll.answers[idx].text));
+    });
 
     this.descDiv = this.firstElementChild.nextElementSibling as HTMLElement;
     this.typeDiv = this.descDiv.firstElementChild as HTMLElement;
@@ -313,7 +351,7 @@ export default class PollElement extends HTMLElement {
           const time = Date.now();
           const percents = (closeTime - time) / period;
           const timeLeft = (closeTime - time) / 1000 + 1 | 0;
-          timeLeftDiv.innerHTML = String(timeLeft).toHHMMSS();
+          timeLeftDiv.innerHTML = toHHMMSS(timeLeft);
           
           if (timeLeft <= 5) {
             timeLeftDiv.style.color = '#ee545c';
@@ -396,12 +434,16 @@ export default class PollElement extends HTMLElement {
       footerDiv.append(this.sendVoteBtn);
     }
 
-    //const width = this.getBoundingClientRect().width;
-    //this.maxLength = width + tailLength + this.maxOffset + -13.7; // 13 - position left
+    // const width = this.getBoundingClientRect().width;
+    // const width = mediaSizes.active.poll.width;
+    // this.maxLength = width + tailLength + this.maxOffset + -13.7; // 13 - position left
 
-    if(poll.chosenIndexes.length || this.isClosed) {
+    const canVote = !(poll.chosenIndexes.length || this.isClosed);
+    if(!canVote || this.isPublic) {
       this.performResults(results, poll.chosenIndexes, false);
-    } else if(!this.isClosed) {
+    }
+
+    if(canVote) {
       this.setVotersCount(results);
       attachClickEvent(this, this.clickHandler);
     }
@@ -556,30 +598,20 @@ export default class PollElement extends HTMLElement {
         this.votersCountDiv.classList.toggle('hide', !!this.chosenIndexes.length);
       }
 
-      let html = '';
-      /**
-       * MACOS, ANDROID - без реверса
-       * WINDOWS DESKTOP - реверс
-       * все приложения накладывают аватарку первую на вторую, а в макете зато вторая на первую, ЛОЛ!
-       */
-      results.recent_voters/* .slice().reverse() */.forEach((userId, idx) => {
-        const style = idx === 0 ? '' : `style="transform: translateX(-${idx * 3}px);"`;
-        html += `<avatar-element class="avatar-16" dialog="0" peer="${userId}" ${style}></avatar-element>`;
-      });
-      this.avatarsDiv.innerHTML = html;
+      const peerIds = (results.recent_voters || []).map(userId => userId.toPeerId());
+      const stackedAvatars = new StackedAvatars({avatarSize: 16});
+      stackedAvatars.render(peerIds);
+      replaceContent(this.avatarsDiv, stackedAvatars.container);
     }
 
     if(this.isMultiple) {
-      this.sendVoteBtn.classList.toggle('hide', !!this.chosenIndexes.length);
-      if(!this.chosenIndexes.length) {
-        this.votersCountDiv.classList.add('hide');
-        this.viewResults.classList.add('hide');
-      } else if(this.isPublic) {
-        this.viewResults.classList.toggle('hide', !results.total_voters || !this.chosenIndexes.length);
-        this.votersCountDiv.classList.toggle('hide', !!this.chosenIndexes.length);
-      } else {
-        this.votersCountDiv.classList.toggle('hide', !this.chosenIndexes.length);
-      }
+      const isVoted = !!this.chosenIndexes.length;
+
+      const hideSendVoteBtn = this.isClosed || isVoted;
+      const hideViewResultsBtn = !this.isPublic || !results.total_voters || (!isVoted && !this.isClosed);
+      this.sendVoteBtn.classList.toggle('hide', hideSendVoteBtn);
+      this.viewResults.classList.toggle('hide', hideViewResultsBtn);
+      this.votersCountDiv.classList.toggle('hide', !hideSendVoteBtn || !hideViewResultsBtn);
     }
   }
 
@@ -591,7 +623,7 @@ export default class PollElement extends HTMLElement {
     });
 
     const maxValue = Math.max(...percents);
-    //this.maxLengths = percents.map(p => p / maxValue * this.maxLength);
+    // this.maxLengths = percents.map(p => p / maxValue * this.maxLength);
     this.maxPercents = percents.map(p => p / maxValue);
 
     // line
@@ -690,9 +722,10 @@ export default class PollElement extends HTMLElement {
       svg.style.strokeDasharray = '';
       svg.style.strokeDashoffset = '';
     } else {
-      //svg.style.strokeDasharray = (percents * this.maxLengths[index]) + ', 485.9';
-      svg.style.strokeDasharray = (multiplier * this.maxPercents[index] * 100) + '%, 485.9';
-      svg.style.strokeDashoffset = '' + multiplier * this.maxOffset;
+      // svg.style.strokeDasharray = (multiplier * this.maxLengths[index]) + ', 485.9';
+      svg.style.strokeDasharray = (multiplier * this.maxPercents[index] * PollElement.MAX_LENGTH) + ', 485.9';
+      // svg.style.strokeDasharray = (multiplier * this.maxPercents[index] * 100) + '%, 485.9';
+      svg.style.strokeDashoffset = '' + multiplier * PollElement.MAX_OFFSET;
     }
   }
 

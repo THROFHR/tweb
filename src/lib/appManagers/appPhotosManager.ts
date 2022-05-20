@@ -10,12 +10,10 @@
  */
 
 import type { DownloadOptions } from "../mtproto/apiFileManager";
-import { bytesFromHex } from "../../helpers/bytes";
 import { CancellablePromise } from "../../helpers/cancellablePromise";
 import { getFileNameByLocation } from "../../helpers/fileName";
-import { safeReplaceArrayInObject, isObject } from "../../helpers/object";
-import { isSafari } from "../../helpers/userAgent";
-import { InputFileLocation, InputMedia, Photo, PhotoSize, PhotosPhotos } from "../../layer";
+import { IS_SAFARI } from "../../environment/userAgent";
+import { InputFileLocation, InputMedia, InputPhoto, Photo, PhotoSize, PhotosPhotos } from "../../layer";
 import apiManager from "../mtproto/mtprotoworker";
 import referenceDatabase, { ReferenceContext } from "../mtproto/referenceDatabase";
 import { MyDocument } from "./appDocsManager";
@@ -23,9 +21,15 @@ import appDownloadManager, { ThumbCache } from "./appDownloadManager";
 import appUsersManager from "./appUsersManager";
 import blur from "../../helpers/blur";
 import { MOUNT_CLASS_TO } from "../../config/debug";
-import renderImageFromUrl from "../../helpers/dom/renderImageFromUrl";
+import { renderImageFromUrlPromise } from "../../helpers/dom/renderImageFromUrl";
 import calcImageInBox from "../../helpers/calcImageInBox";
 import { makeMediaSize, MediaSize } from "../../helpers/mediaSizes";
+import windowSize from "../../helpers/windowSize";
+import bytesFromHex from "../../helpers/bytes/bytesFromHex";
+import isObject from "../../helpers/object/isObject";
+import safeReplaceArrayInObject from "../../helpers/object/safeReplaceArrayInObject";
+import bytesToDataURL from "../../helpers/bytes/bytesToDataURL";
+import { REPLIES_HIDDEN_CHANNEL_ID } from "../mtproto/mtproto_config";
 
 export type MyPhoto = Photo.photo;
 
@@ -37,22 +41,8 @@ export class AppPhotosManager {
     [id: string]: MyPhoto
   } = {};
 
-  public windowW = 0;
-  public windowH = 0;
-  
   private static jpegHeader = bytesFromHex('ffd8ffe000104a46494600010100000100010000ffdb004300281c1e231e19282321232d2b28303c64413c37373c7b585d4964918099968f808c8aa0b4e6c3a0aadaad8a8cc8ffcbdaeef5ffffff9bc1fffffffaffe6fdfff8ffdb0043012b2d2d3c353c76414176f8a58ca5f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8ffc00011080000000003012200021101031101ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b5100002010303020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffc4001f0100030101010101010101010000000000000102030405060708090a0bffc400b51100020102040403040705040400010277000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9faffda000c03010002110311003f00');
   private static jpegTail = bytesFromHex('ffd9');
-  
-  constructor() {
-    // @ts-ignore
-    const w: any = 'visualViewport' in window ? window.visualViewport : window;
-    const set = () => {
-      this.windowW = w.width || w.innerWidth;
-      this.windowH = w.height || w.innerHeight;
-    };
-    w.addEventListener('resize', set);
-    set();
-  }
   
   public savePhoto(photo: Photo, context?: ReferenceContext) {
     if(photo._ === 'photoEmpty') return undefined;
@@ -87,7 +77,7 @@ export class AppPhotosManager {
     return this.photos[photo.id] = photo;
   }
   
-  public choosePhotoSize(photo: MyPhoto | MyDocument, boxWidth = 0, boxHeight = 0, useBytes = false) {
+  public choosePhotoSize(photo: MyPhoto | MyDocument, boxWidth = 0, boxHeight = 0, useBytes = false, pushDocumentSize = false) {
     if(window.devicePixelRatio > 1) {
       boxWidth *= 2;
       boxHeight *= 2;
@@ -105,7 +95,17 @@ export class AppPhotosManager {
     d	crop	1280x1280 */
 
     let bestPhotoSize: PhotoSize = {_: 'photoSizeEmpty', type: ''};
-    const sizes = ((photo as MyPhoto).sizes || (photo as MyDocument).thumbs) as PhotoSize[];
+    let sizes = (photo as MyPhoto).sizes || (photo as MyDocument).thumbs as PhotoSize[];
+    if(pushDocumentSize && sizes && photo._ === 'document') {
+      sizes = sizes.concat({
+        _: 'photoSize', 
+        w: (photo as MyDocument).w, 
+        h: (photo as MyDocument).h, 
+        size: (photo as MyDocument).size, 
+        type: undefined
+      });
+    }
+
     if(sizes?.length) {
       for(let i = 0, length = sizes.length; i < length; ++i) {
         const photoSize = sizes[i];
@@ -127,7 +127,7 @@ export class AppPhotosManager {
     return bestPhotoSize;
   }
   
-  public getUserPhotos(userId: number, maxId: string = '0', limit: number = 20) {
+  public getUserPhotos(userId: UserId, maxId: Photo.photo['id'] = '0', limit: number = 20) {
     const inputUser = appUsersManager.getUserInput(userId);
     return apiManager.invokeApiCacheable('photos.getUserPhotos', {
       user_id: inputUser,
@@ -136,13 +136,21 @@ export class AppPhotosManager {
       max_id: maxId
     }, {cacheSeconds: 60}).then((photosResult) => {
       appUsersManager.saveApiUsers(photosResult.users);
-      const photoIds: string[] = photosResult.photos.map((photo, idx) => {
-        photosResult.photos[idx] = this.savePhoto(photo, {type: 'profilePhoto', peerId: userId});
+      const photoIds = photosResult.photos.map((photo, idx) => {
+        photosResult.photos[idx] = this.savePhoto(photo, {type: 'profilePhoto', peerId: userId.toPeerId()});
         return photo.id;
       });
+
+      // ! WARNING !
+      if(maxId !== '0' && maxId) {
+        const idx = photoIds.indexOf(maxId);
+        if(idx !== -1) {
+          photoIds.splice(idx, 1);
+        }
+      }
       
       return {
-        count: (photosResult as PhotosPhotos.photosPhotosSlice).count || photosResult.photos.length,
+        count: (photosResult as PhotosPhotos.photosPhotosSlice).count || photoIds.length,
         photos: photoIds
       };
     });
@@ -160,13 +168,12 @@ export class AppPhotosManager {
 
     let mimeType: string;
     if(isSticker) {
-      mimeType = isSafari ? 'image/png' : 'image/webp';
+      mimeType = IS_SAFARI ? 'image/png' : 'image/webp';
     } else {
       mimeType = 'image/jpeg';
     }
 
-    const blob = new Blob([arr], {type: mimeType});
-    return URL.createObjectURL(blob);
+    return bytesToDataURL(arr, mimeType);
   }
 
   /**
@@ -204,27 +211,42 @@ export class AppPhotosManager {
   public getImageFromStrippedThumb(photo: MyPhoto | MyDocument, thumb: PhotoSize.photoCachedSize | PhotoSize.photoStrippedSize, useBlur: boolean) {
     const url = this.getPreviewURLFromThumb(photo, thumb, false);
 
-    const image = new Image();
-    image.classList.add('thumbnail');
+    let element: HTMLImageElement | HTMLCanvasElement, loadPromise: Promise<void>;
+    if(!useBlur) {
+      element = new Image();
+      loadPromise = renderImageFromUrlPromise(element, url);
+    } else {
+      const result = blur(url);
+      element = result.canvas;
+      loadPromise = result.promise;
+    }
 
-    const loadPromise = (useBlur ? blur(url) : Promise.resolve(url)).then(url => {
-      return new Promise<any>((resolve) => {
-        renderImageFromUrl(image, url, resolve);
-      });
-    });
+    element.classList.add('thumbnail');
     
-    return {image, loadPromise};
+    return {image: element, loadPromise};
   }
   
-  public setAttachmentSize(photo: MyPhoto | MyDocument, element: HTMLElement | SVGForeignObjectElement, boxWidth: number, boxHeight: number, noZoom = true, message?: any) {
-    const photoSize = this.choosePhotoSize(photo, boxWidth, boxHeight);
+  public setAttachmentSize(
+    photo: MyPhoto | MyDocument, 
+    element: HTMLElement | SVGForeignObjectElement, 
+    boxWidth: number, 
+    boxHeight: number, 
+    noZoom = true, 
+    message?: any,
+    pushDocumentSize?: boolean,
+    photoSize?: ReturnType<AppPhotosManager['choosePhotoSize']>
+  ) {
+    if(!photoSize) {
+      photoSize = this.choosePhotoSize(photo, boxWidth, boxHeight, undefined, pushDocumentSize);
+    }
     //console.log('setAttachmentSize', photo, photo.sizes[0].bytes, div);
     
     let size: MediaSize;
-    if(photo._ === 'document') {
-      size = makeMediaSize(photo.w || 512, photo.h || 512);
+    const isDocument = photo._ === 'document';
+    if(isDocument) {
+      size = makeMediaSize((photo as MyDocument).w || (photoSize as PhotoSize.photoSize).w || 512, (photo as MyDocument).h || (photoSize as PhotoSize.photoSize).h || 512);
     } else {
-      size = makeMediaSize('w' in photoSize ? photoSize.w : 100, 'h' in photoSize ? photoSize.h : 100);
+      size = makeMediaSize((photoSize as PhotoSize.photoSize).w || 100, (photoSize as PhotoSize.photoSize).h || 100);
     }
 
     let boxSize = makeMediaSize(boxWidth, boxHeight);
@@ -233,7 +255,7 @@ export class AppPhotosManager {
 
     let isFit = true;
 
-    if(photo._ === 'photo' || ['video', 'gif'].includes(photo.type)) {
+    if(!isDocument || ['video', 'gif'].includes((photo as MyDocument).type)) {
       if(boxSize.width < 200 && boxSize.height < 200) { // make at least one side this big
         boxSize = size = size.aspectCovered(makeMediaSize(200, 200));
       }
@@ -242,7 +264,7 @@ export class AppPhotosManager {
         (message.message || 
           message.reply_to_mid || 
           message.media.webpage || 
-          (message.replies && message.replies.pFlags.comments && message.replies.channel_id !== 777)
+          (message.replies && message.replies.pFlags.comments && message.replies.channel_id.toChatId() !== REPLIES_HIDDEN_CHANNEL_ID)
         )
       ) { // make sure that bubble block is human-readable
         if(boxSize.width < 320) {
@@ -251,7 +273,7 @@ export class AppPhotosManager {
         }
       }
   
-      if(isFit && boxSize.width < 120) { // if image is too narrow
+      if(isFit && boxSize.width < 120 && message) { // if image is too narrow
         boxSize = makeMediaSize(120, boxSize.height);
         isFit = false;
       }
@@ -342,8 +364,8 @@ export class AppPhotosManager {
     }
 
     if(!photoSize) {
-      const fullWidth = this.windowW;
-      const fullHeight = this.windowH;
+      const fullWidth = windowSize.width;
+      const fullHeight = windowSize.height;
       
       photoSize = this.choosePhotoSize(photo, fullWidth, fullHeight);
     }
@@ -381,15 +403,19 @@ export class AppPhotosManager {
     return isObject(photoId) ? photoId as MyPhoto : this.photos[photoId as any as string];
   }
 
-  public getInput(photo: MyPhoto): InputMedia.inputMediaPhoto {
+  public getInput(photo: MyPhoto): InputPhoto.inputPhoto {
+    return {
+      _: 'inputPhoto',
+      id: photo.id,
+      access_hash: photo.access_hash,
+      file_reference: photo.file_reference
+    };
+  }
+
+  public getMediaInput(photo: MyPhoto): InputMedia.inputMediaPhoto {
     return {
       _: 'inputMediaPhoto',
-      id: {
-        _: 'inputPhoto',
-        id: photo.id,
-        access_hash: photo.access_hash,
-        file_reference: photo.file_reference
-      },
+      id: this.getInput(photo),
       ttl_seconds: 0
     };
   }

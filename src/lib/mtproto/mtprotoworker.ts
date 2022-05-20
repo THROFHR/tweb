@@ -4,23 +4,36 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import type { LocalStorageProxyTask, LocalStorageProxyTaskResponse } from '../localStorage';
+//import type { LocalStorageProxyDeleteTask, LocalStorageProxySetTask } from '../storage';
+import type { Awaited, InvokeApiOptions, WorkerTaskVoidTemplate } from '../../types';
+import type { Config, InputFile, JSONValue, MethodDeclMap, User } from '../../layer';
 import MTProtoWorker from 'worker-loader!./mtproto.worker';
 //import './mtproto.worker';
-import { isObject } from '../../helpers/object';
-import type { MethodDeclMap } from '../../layer';
-import type { InvokeApiOptions } from '../../types';
-import CryptoWorkerMethods from '../crypto/crypto_methods';
+import CryptoWorkerMethods, { CryptoMethods } from '../crypto/crypto_methods';
 import { logger } from '../logger';
 import rootScope from '../rootScope';
 import webpWorkerController from '../webp/webpWorkerController';
-import type { DownloadOptions } from './apiFileManager';
-import type { ServiceWorkerTask } from './mtproto.service';
+import { ApiFileManager, DownloadOptions } from './apiFileManager';
+import type { RequestFilePartTask, RequestFilePartTaskResponse, ServiceWorkerTask } from '../serviceWorker/index.service';
 import { UserAuth } from './mtproto_config';
 import type { MTMessage } from './networker';
 import DEBUG, { MOUNT_CLASS_TO } from '../../config/debug';
 import Socket from './transports/websocket';
-import IDBStorage from '../idb';
 import singleInstance from './singleInstance';
+import sessionStorage from '../sessionStorage';
+import webPushApiManager from './webPushApiManager';
+import AppStorage from '../storage';
+import appRuntimeManager from '../appManagers/appRuntimeManager';
+import { SocketProxyTask } from './transports/socketProxied';
+import telegramMeWebManager from './telegramMeWebManager';
+import { CacheStorageDbName } from '../cacheStorage';
+import pause from '../../helpers/schedulers/pause';
+import IS_WEBP_SUPPORTED from '../../environment/webpSupport';
+import type { ApiError } from './apiManager';
+import { MTAppConfig } from './appConfig';
+import { ignoreRestrictionReasons } from '../../helpers/restrictions';
+import isObject from '../../helpers/object/isObject';
 
 type Task = {
   taskId: number,
@@ -37,9 +50,13 @@ type HashOptions = {
   [queryJSON: string]: HashResult
 };
 
+export interface ToggleStorageTask extends WorkerTaskVoidTemplate {
+  type: 'toggleStorage',
+  payload: boolean
+};
+
 export class ApiManagerProxy extends CryptoWorkerMethods {
   public worker: /* Window */Worker;
-  public postMessage: (...args: any[]) => void;
   private afterMessageIdTemp = 0;
 
   private taskId = 0;
@@ -58,6 +75,9 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
 
   private hashes: {[method: string]: HashOptions} = {};
 
+  private apiPromisesSingleProcess: {
+    [q: string]: Map<any, Promise<any>>
+  } = {};
   private apiPromisesSingle: {
     [q: string]: Promise<any>
   } = {};
@@ -80,8 +100,14 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
   private sockets: Map<number, Socket> = new Map();
 
   private taskListeners: {[taskType: string]: (task: any) => void} = {};
+  private taskListenersSW: {[taskType: string]: (task: any) => void} = {};
 
   public onServiceWorkerFail: () => void;
+
+  private postMessagesWaiting: any[][] = [];
+
+  private getConfigPromise: Promise<Config.config>;
+  private getAppConfigPromise: Promise<MTAppConfig>;
 
   constructor() {
     super();
@@ -92,21 +118,30 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     this.registerServiceWorker();
 
     this.addTaskListener('clear', () => {
-      const promise = IDBStorage.deleteDatabase();
-      promise.finally(() => {
-        location.reload();
+      const toClear: CacheStorageDbName[] = ['cachedFiles', 'cachedStreamChunks'];
+      Promise.all([
+        AppStorage.toggleStorage(false), 
+        sessionStorage.clear(),
+        Promise.race([
+          telegramMeWebManager.setAuthorized(false),
+          pause(3000)
+        ]),
+        webPushApiManager.forceUnsubscribe(),
+        Promise.all(toClear.map(cacheName => caches.delete(cacheName)))
+      ]).finally(() => {
+        appRuntimeManager.reload();
       });
     });
 
     this.addTaskListener('connectionStatusChange', (task: any) => {
-      rootScope.broadcast('connection_status_change', task.payload);
+      rootScope.dispatchEvent('connection_status_change', task.payload);
     });
 
     this.addTaskListener('convertWebp', (task) => {
       webpWorkerController.postMessage(task);
     });
 
-    this.addTaskListener('socketProxy', (task) => {
+    this.addTaskListener('socketProxy', (task: SocketProxyTask) => {
       const socketTask = task.payload;
       const id = socketTask.id;
       //console.log('socketProxy', socketTask, id);
@@ -114,7 +149,7 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
       if(socketTask.type === 'send') {
         const socket = this.sockets.get(id);
         socket.send(socketTask.payload);
-      } else if(socketTask.type === 'close') {
+      } else if(socketTask.type === 'close') { // will remove from map in onClose
         const socket = this.sockets.get(id);
         socket.close();
       } else if(socketTask.type === 'setup') {
@@ -162,9 +197,33 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
       }
     });
 
+    this.addTaskListener('localStorageProxy', (task: LocalStorageProxyTask) => {
+      const storageTask = task.payload;
+      // @ts-ignore
+      sessionStorage[storageTask.type](...storageTask.args).then(res => {
+        this.postMessage({
+          type: 'localStorageProxy',
+          id: task.id,
+          payload: res
+        } as LocalStorageProxyTaskResponse);
+      });
+    });
+
+    rootScope.addEventListener('language_change', (language) => {
+      this.performTaskWorkerVoid('setLanguage', language);
+    });
+
+    window.addEventListener('online', (event) => {
+      this.forceReconnectTimeout();
+    });
+
     /// #if !MTPROTO_SW
     this.registerWorker();
     /// #endif
+
+    setTimeout(() => {
+      this.getConfig();
+    }, 5000);
   }
 
   public isServiceWorkerOnline() {
@@ -183,6 +242,8 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
       sw.addEventListener('statechange', (e) => {
         this.log('SW statechange', e);
       });
+
+      //this.postSWMessage = worker.controller.postMessage.bind(worker.controller);
 
       /// #if MTPROTO_SW
       const controller = worker.controller || registration.installing || registration.waiting || registration.active;
@@ -214,14 +275,45 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
       if(!isObject(task)) {
         return;
       }
-      
-      this.postMessage(task);
+
+      const callback = this.taskListenersSW[task.type];
+      if(callback) {
+        callback(task);
+      }
     });
+
+    this.addServiceWorkerTaskListener('requestFilePart', (task: RequestFilePartTask) => {
+      const responseTask: RequestFilePartTaskResponse = {
+        type: task.type,
+        id: task.id
+      };
+      
+      this.performTaskWorker<Awaited<ReturnType<ApiFileManager['requestFilePart']>>>('requestFilePart', ...task.payload)
+      .then((uploadFile) => {
+        responseTask.payload = uploadFile;
+        this.postSWMessage(responseTask);
+      }, (err) => {
+        responseTask.originalPayload = task.payload;
+        responseTask.error = err;
+        this.postSWMessage(responseTask);
+      });
+    });
+
     /// #endif
 
     worker.addEventListener('messageerror', (e) => {
       this.log.error('SW messageerror:', e);
     });
+  }
+
+  public postMessage(...args: any[]) {
+    this.postMessagesWaiting.push(args);
+  }
+
+  public postSWMessage(message: any) {
+    if(navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage(message);
+    }
   }
 
   private onWorkerFirstMessage(worker: any) {
@@ -231,9 +323,13 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
 
       this.postMessage = this.worker.postMessage.bind(this.worker);
 
-      const isWebpSupported = webpWorkerController.isWebpSupported();
+      this.postMessagesWaiting.forEach(args => this.postMessage(...args));
+      this.postMessagesWaiting.length = 0;
+
+      const isWebpSupported = IS_WEBP_SUPPORTED;
       this.log('WebP supported:', isWebpSupported);
       this.postMessage({type: 'webpSupport', payload: isWebpSupported});
+      this.postMessage({type: 'userAgent', payload: navigator.userAgent});
 
       this.releasePending();
     }
@@ -241,6 +337,10 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
 
   public addTaskListener(name: keyof ApiManagerProxy['taskListeners'], callback: ApiManagerProxy['taskListeners'][typeof name]) {
     this.taskListeners[name] = callback;
+  }
+
+  public addServiceWorkerTaskListener(name: keyof ApiManagerProxy['taskListenersSW'], callback: ApiManagerProxy['taskListenersSW'][typeof name]) {
+    this.taskListenersSW[name] = callback;
   }
 
   private onWorkerMessage = (e: MessageEvent) => {
@@ -263,7 +363,7 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
         this.updatesProcessor(task.update);
       }
     } else if(task.progress) {
-      rootScope.broadcast('download_progress', task.progress);
+      rootScope.dispatchEvent('download_progress', task.progress);
     } else if(task.hasOwnProperty('result') || task.hasOwnProperty('error')) {
       this.finalizeTask(task.taskId, task.result, task.error);
     }
@@ -271,9 +371,10 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
 
   /// #if !MTPROTO_SW
   private registerWorker() {
-    //return;
+    // return;
 
     const worker = new MTProtoWorker();
+    // const worker = new Worker(new URL('./mtproto.worker.ts', import.meta.url));
     //const worker = window;
     worker.addEventListener('message', this.onWorkerFirstMessage.bind(this, worker), {once: true});
     worker.addEventListener('message', this.onWorkerMessage);
@@ -293,23 +394,34 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     }
   }
 
-  public performTaskWorker<T>(task: string, ...args: any[]) {
-    this.debug && this.log.debug('start', task, args);
+  private createTask(task: string, type: string, args: any[]): any {
+    return {
+      task,
+      taskId: this.taskId++,
+      type,
+      args,
+    };
+  }
+
+  public performTaskWorkerVoid(taskName: string, ...args: any[]) {
+    const task = this.createTask(taskName, undefined, args);
+    this.pending.push(task);
+    this.releasePending();
+  }
+
+  public performTaskWorkerNew<T>(taskName: string, type: string, ...args: any[]) {
+    this.debug && this.log.debug('start', taskName, args);
 
     return new Promise<T>((resolve, reject) => {
-      this.awaiting[this.taskId] = {resolve, reject, taskName: task};
-  
-      const params = {
-        task,
-        taskId: this.taskId,
-        args
-      };
-
-      this.pending.push(params);
+      const task = this.createTask(taskName, type, args);
+      this.pending.push(task);
+      this.awaiting[task.taskId] = {resolve, reject, taskName: taskName};
       this.releasePending();
-  
-      this.taskId++;
     });
+  }
+
+  public performTaskWorker<T>(task: string, ...args: any[]) {
+    return this.performTaskWorkerNew<T>(task, undefined, ...args);
   }
 
   private releasePending() {
@@ -330,6 +442,12 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     this.updatesProcessor = callback;
   }
 
+  /// #if MTPROTO_WORKER
+  public invokeCrypto<Method extends keyof CryptoMethods>(method: Method, ...args: Parameters<CryptoMethods[typeof method]>): Promise<Awaited<ReturnType<CryptoMethods[typeof method]>>> {
+    return this.performTaskWorkerNew(method, 'crypto', ...args);
+  }
+  /// #endif
+
   public invokeApi<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {}, options: InvokeApiOptions = {}): Promise<MethodDeclMap[T]['res']> {
     //console.log('will invokeApi:', method, params, options);
     return this.performTaskWorker('invokeApi', method, params, options);
@@ -346,8 +464,19 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     return this.invokeApi(method, params, o);
   }
 
-  public invokeApiHashable<T extends keyof MethodDeclMap>(method: T, params: Omit<MethodDeclMap[T]['req'], 'hash'> = {} as any, options: InvokeApiOptions = {}): Promise<MethodDeclMap[T]['res']> {
+  public invokeApiHashable<T extends keyof MethodDeclMap, R>(o: {
+    method: T, 
+    processResult?: (response: MethodDeclMap[T]['res']) => R, 
+    processError?: (error: ApiError) => any,
+    params?: Omit<MethodDeclMap[T]['req'], 'hash'>, 
+    options?: InvokeApiOptions & {cacheKey?: string}
+  }): Promise<R> {
+    // @ts-ignore
+    o.params ??= {};
+    o.options ??= {};
     //console.log('will invokeApi:', method, params, options);
+
+    const {params, options, method} = o;
 
     const queryJSON = JSON.stringify(params);
     let cached: HashResult;
@@ -358,35 +487,78 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
       }
     }
 
-    return this.invokeApi(method, params, options).then((result: any) => {
-      if(result._.includes('NotModified')) {
-        this.debug && this.log.warn('NotModified saved!', method, queryJSON);
-        return cached.result;
-      }
-      
-      if(result.hash/*  || result.messages */) {
-        const hash = result.hash/*  || this.computeHash(result.messages) */;
+    return this.invokeApiSingleProcess({
+      method,
+      processResult: (result) => {
+        if(result._.includes('NotModified')) {
+          this.debug && this.log.warn('NotModified saved!', method, queryJSON);
+          return cached.result;
+        }
         
-        if(!this.hashes[method]) this.hashes[method] = {};
-        this.hashes[method][queryJSON] = {
-          hash,
-          result
-        };
-      }
+        if(result.hash/*  || result.messages */) {
+          const hash = result.hash/*  || this.computeHash(result.messages) */;
+          
+          if(!this.hashes[method]) this.hashes[method] = {};
+          this.hashes[method][queryJSON] = {
+            hash,
+            result
+          };
+        }
 
-      return result;
+        if(o.processResult) {
+          return o.processResult(result);
+        }
+  
+        return result;
+      },
+      params,
+      options
     });
   }
 
   public invokeApiSingle<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {} as any, options: InvokeApiOptions = {}): Promise<MethodDeclMap[T]['res']> {
     const q = method + '-' + JSON.stringify(params);
-    if(this.apiPromisesSingle[q]) {
-      return this.apiPromisesSingle[q];
+    const cache = this.apiPromisesSingle;
+    if(cache[q]) {
+      return cache[q];
     }
 
-    return this.apiPromisesSingle[q] = this.invokeApi(method, params, options).finally(() => {
-      delete this.apiPromisesSingle[q];
+    return cache[q] = this.invokeApi(method, params, options).finally(() => {
+      delete cache[q];
     });
+  }
+
+  public invokeApiSingleProcess<T extends keyof MethodDeclMap, R>(o: {
+    method: T, 
+    processResult: (response: MethodDeclMap[T]['res']) => R, 
+    processError?: (error: ApiError) => any,
+    params?: MethodDeclMap[T]['req'], 
+    options?: InvokeApiOptions & {cacheKey?: string}
+  }): Promise<R> {
+    o.params ??= {};
+    o.options ??= {};
+
+    const {method, processResult, processError, params, options} = o;
+    const cache = this.apiPromisesSingleProcess;
+    const cacheKey = options.cacheKey || JSON.stringify(params);
+    const map = cache[method] ?? (cache[method] = new Map());
+    const oldPromise = map.get(cacheKey);
+    if(oldPromise) {
+      return oldPromise;
+    }
+    
+    const originalPromise = this.invokeApi(method, params, options);
+    const newPromise: Promise<R> = originalPromise.then(processResult, processError);
+
+    const p = newPromise.finally(() => {
+      map.delete(cacheKey);
+      if(!map.size) {
+        delete cache[method];
+      }
+    });
+
+    map.set(cacheKey, p);
+    return p;
   }
 
   public invokeApiCacheable<T extends keyof MethodDeclMap>(method: T, params: MethodDeclMap[T]['req'] = {} as any, options: InvokeApiOptions & Partial<{cacheSeconds: number, override: boolean}> = {}): Promise<MethodDeclMap[T]['res']> {
@@ -432,12 +604,16 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     if(cache) {
       for(const queryJSON in cache) {
         const item = cache[queryJSON];
-        if(verify(item.params)) {
-          if(item.timeout) {
-            clearTimeout(item.timeout);
+        try {
+          if(verify(item.params)) {
+            if(item.timeout) {
+              clearTimeout(item.timeout);
+            }
+  
+            delete cache[queryJSON];
           }
-
-          delete cache[queryJSON];
+        } catch(err) {
+          this.log.error('clearCache error:', err, queryJSON, item);
         }
       }
     }
@@ -457,9 +633,18 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
     return this.performTaskWorker('setQueueId', queueId);
   }
 
-  public setUserAuth(userAuth: UserAuth) {
-    rootScope.broadcast('user_auth', userAuth);
+  public setUserAuth(userAuth: UserAuth | UserId) {
+    if(typeof(userAuth) === 'string' || typeof(userAuth) === 'number') {
+      userAuth = {dcID: 0, date: Date.now() / 1000 | 0, id: userAuth.toPeerId(false)};
+    }
+    
+    rootScope.dispatchEvent('user_auth', userAuth);
     return this.performTaskWorker('setUserAuth', userAuth);
+  }
+
+  public setUser(user: User) {
+    // appUsersManager.saveApiUser(user);
+    return this.setUserAuth(user.id);
   }
 
   public getNetworker(dc_id: number, options?: InvokeApiOptions) {
@@ -467,6 +652,7 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
   }
 
   public logOut(): Promise<void> {
+    // AppStorage.toggleStorage(false);
     return this.performTaskWorker('logOut');
   }
 
@@ -475,23 +661,57 @@ export class ApiManagerProxy extends CryptoWorkerMethods {
   }
 
   public downloadFile(options: DownloadOptions) {
-    return this.performTaskWorker('downloadFile', options);
+    return this.performTaskWorker<Blob>('downloadFile', options);
   }
 
   public uploadFile(options: {file: Blob | File, fileName: string}) {
-    return this.performTaskWorker('uploadFile', options);
+    return this.performTaskWorker<InputFile>('uploadFile', options);
   }
 
   public toggleStorage(enabled: boolean) {
-    return this.performTaskWorker('toggleStorage', enabled);
+    const task: ToggleStorageTask = {type: 'toggleStorage', payload: enabled};
+    this.postMessage(task);
+    this.postSWMessage(task);
   }
 
   public stopAll() {
-    return this.performTaskWorker('stopAll');
+    return this.performTaskWorkerVoid('stopAll');
   }
 
   public startAll() {
-    return this.performTaskWorker('startAll');
+    return this.performTaskWorkerVoid('startAll');
+  }
+
+  public forceReconnectTimeout() {
+    this.postMessage({type: 'online'});
+  }
+
+  public forceReconnect() {
+    this.postMessage({type: 'forceReconnect'});
+  }
+
+  public getConfig() {
+    if(this.getConfigPromise) return this.getConfigPromise;
+    return this.getConfigPromise = this.invokeApi('help.getConfig').then(config => {
+      rootScope.config = config;
+      return config;
+    });
+  }
+
+  public getAppConfig(overwrite?: boolean) {
+    if(rootScope.appConfig && !overwrite) return rootScope.appConfig;
+    if(this.getAppConfigPromise && !overwrite) return this.getAppConfigPromise;
+    const promise: Promise<MTAppConfig> = this.getAppConfigPromise = this.invokeApi('help.getAppConfig').then((config: MTAppConfig) => {
+      if(this.getAppConfigPromise !== promise) {
+        return this.getAppConfigPromise;
+      }
+      
+      rootScope.appConfig = config;
+      ignoreRestrictionReasons(config.ignore_restriction_reasons ?? []);
+      return config;
+    });
+
+    return promise;
   }
 }
 

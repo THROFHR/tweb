@@ -7,21 +7,21 @@
 import { CancellablePromise } from "../helpers/cancellablePromise";
 import SetTransition from "./singleTransition";
 import { fastRaf } from "../helpers/schedulers";
-import { safeAssign } from "../helpers/object";
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { attachClickEvent } from "../helpers/dom/clickEvent";
 import isInDOM from "../helpers/dom/isInDOM";
+import safeAssign from "../helpers/object/safeAssign";
 
 const TRANSITION_TIME = 200;
 
 export default class ProgressivePreloader {
   public preloader: HTMLDivElement;
-  private circle: SVGCircleElement;
+  public circle: SVGCircleElement;
   private cancelSvg: SVGSVGElement;
   private downloadSvg: HTMLElement;
   
   private tempId = 0;
-  private detached = true;
+  public detached = true;
 
   public promise: CancellablePromise<any> = null;
 
@@ -31,9 +31,9 @@ export default class ProgressivePreloader {
   private tryAgainOnFail = true;
   private attachMethod: 'append' | 'prepend' = 'append';
 
-  public loadFunc: () => {download: CancellablePromise<any>};
+  public loadFunc: (e?: Event) => {download: CancellablePromise<any>};
 
-  private totalLength: number;
+  public totalLength: number;
 
   constructor(options?: Partial<{
     isUpload: ProgressivePreloader['isUpload'],
@@ -85,6 +85,12 @@ export default class ProgressivePreloader {
     </svg>
     </div>`;
 
+    if(this.streamable) {
+      this.totalLength = 118.61124420166016;
+    } else {
+      this.totalLength = 149.82473754882812;
+    }
+
     if(this.cancelable) {
       this.preloader.innerHTML += `
       <svg xmlns="http://www.w3.org/2000/svg" class="preloader-close" viewBox="0 0 24 24">
@@ -120,7 +126,7 @@ export default class ProgressivePreloader {
 
     if(this.preloader.classList.contains('manual')) {
       if(this.loadFunc) {
-        this.loadFunc();
+        this.loadFunc(e);
       }
     } else {
       if(this.promise && this.promise.cancel) {
@@ -147,7 +153,7 @@ export default class ProgressivePreloader {
     const startTime = Date.now();
 
     const onEnd = (err: Error) => {
-      promise.notify = null;
+      promise.notify = promise.notifyAll = null;
 
       if(tempId !== this.tempId) {
         return;
@@ -173,7 +179,7 @@ export default class ProgressivePreloader {
         }
       } else {
         if(this.tryAgainOnFail) {
-          SetTransition(this.preloader, '', true, TRANSITION_TIME);
+          this.attach(this.preloader.parentElement);
           fastRaf(() => {
             this.setManual();
           });
@@ -205,46 +211,38 @@ export default class ProgressivePreloader {
   }
 
   public attach(elem: Element, reset = false, promise?: CancellablePromise<any>) {
+    if(this.construct) {
+      this.construct();
+    }
+
+    if(this.preloader.parentElement) {
+      this.preloader.classList.remove('manual');
+    }
+
+    this.detached = false;
+
     if(promise/*  && false */) {
       this.attachPromise(promise);
     }
 
-    //return;
-
-    this.detached = false;
-    /* fastRaf(() => {
-      if(this.detached) return;
-      this.detached = false; */
-
-      if(this.construct) {
-        this.construct();
-      }
-
-      if(this.preloader.parentElement) {
-        this.preloader.classList.remove('manual');
-      }
-
+    if(this.detached || this.preloader.parentElement !== elem) {
+      const useRafs = isInDOM(this.preloader) ? 1 : 2;
       if(this.preloader.parentElement !== elem) {
         elem[this.attachMethod](this.preloader);
       }
 
-      fastRaf(() => {
-        //console.log('[PP]: attach after rAF', this.detached, performance.now());
+      SetTransition(this.preloader, 'is-visible', true, TRANSITION_TIME, undefined, useRafs);
+    }
 
-        if(this.detached) {
-          return;
-        }
-
-        SetTransition(this.preloader, 'is-visible', true, TRANSITION_TIME);
-      });
-
-      if(this.cancelable && reset) {
-        this.setProgress(0);
-      }
-    //});
+    if(this.cancelable && reset) {
+      this.setProgress(0);
+    }
   }
   
   public detach() {
+    if(this.detached) {
+      return;
+    }
     //return;
 
     this.detached = true;
@@ -256,23 +254,23 @@ export default class ProgressivePreloader {
         /* if(!this.detached) return;
         this.detached = true; */
 
-        fastRaf(() => {
+        // fastRaf(() => {
           //console.log('[PP]: detach after rAF', this.detached, performance.now());
 
-          if(!this.detached || !this.preloader.parentElement) {
-            return;
-          }
+          // if(!this.detached || !this.preloader.parentElement) {
+          //   return;
+          // }
 
           SetTransition(this.preloader, 'is-visible', false, TRANSITION_TIME, () => {
             this.preloader.remove();
-          });
-        });
+          }, 1);
+        // });
       //})/* , 5e3) */;
     }
   }
   
   public setProgress(percents: number) {
-    if(!isInDOM(this.circle)) {
+    if(!this.totalLength && !isInDOM(this.circle)) {
       return;
     }
     

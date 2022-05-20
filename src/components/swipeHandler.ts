@@ -4,9 +4,10 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { cancelEvent } from "../helpers/dom/cancelEvent";
-import { safeAssign } from "../helpers/object";
-import { isTouchSupported } from "../helpers/touchSupport";
+import cancelEvent from "../helpers/dom/cancelEvent";
+import { IS_TOUCH_SUPPORTED } from "../environment/touchSupport";
+import rootScope from "../lib/rootScope";
+import safeAssign from "../helpers/object/safeAssign";
 
 const getEvent = (e: TouchEvent | MouseEvent) => {
   return (e as TouchEvent).touches ? (e as TouchEvent).touches[0] : e as MouseEvent;
@@ -14,32 +15,70 @@ const getEvent = (e: TouchEvent | MouseEvent) => {
 
 const attachGlobalListenerTo = window;
 
+let RESET_GLOBAL = false;
+rootScope.addEventListener('context_menu_toggle', (visible) => {
+  RESET_GLOBAL = visible;
+});
+
+export type SwipeHandlerOptions = {
+  element: SwipeHandler['element'],
+  onSwipe: SwipeHandler['onSwipe'],
+  verifyTouchTarget?: SwipeHandler['verifyTouchTarget'],
+  onFirstSwipe?: SwipeHandler['onFirstSwipe'],
+  onReset?: SwipeHandler['onReset'],
+  cursor?: SwipeHandler['cursor'],
+  cancelEvent?: SwipeHandler['cancelEvent'],
+  listenerOptions?: SwipeHandler['listenerOptions']
+};
+
 export default class SwipeHandler {
   private element: HTMLElement;
-  private onSwipe: (xDiff: number, yDiff: number) => boolean;
+  private onSwipe: (xDiff: number, yDiff: number, e: TouchEvent | MouseEvent) => boolean | void;
   private verifyTouchTarget: (evt: TouchEvent | MouseEvent) => boolean;
   private onFirstSwipe: () => void;
   private onReset: () => void;
+  private cursor: 'grabbing' | 'move' | 'row-resize' | 'col-resize' | 'nesw-resize' | 'nwse-resize' | 'ne-resize' | 'se-resize' | 'sw-resize' | 'nw-resize' | 'n-resize' | 'e-resize' | 's-resize' | 'w-resize' | '' = 'grabbing';
+  private cancelEvent = true;
+  private listenerOptions: boolean | AddEventListenerOptions = false;
+  private setCursorTo: HTMLElement;
 
   private hadMove = false;
   private xDown: number = null;
   private yDown: number = null;
 
-  constructor(options: {
-    element: SwipeHandler['element'],
-    onSwipe: SwipeHandler['onSwipe'],
-    verifyTouchTarget?: SwipeHandler['verifyTouchTarget'],
-    onFirstSwipe?: SwipeHandler['onFirstSwipe'],
-    onReset?: SwipeHandler['onReset'],
-  }) {
+  constructor(options: SwipeHandlerOptions) {
     safeAssign(this, options);
+    
+    this.setCursorTo = this.element;
 
-    if(!isTouchSupported) {
-      this.element.addEventListener('mousedown', this.handleStart, false);
+    this.setListeners();
+  }
+
+  public setListeners() {
+    if(!IS_TOUCH_SUPPORTED) {
+      this.element.addEventListener('mousedown', this.handleStart, this.listenerOptions);
       attachGlobalListenerTo.addEventListener('mouseup', this.reset);
     } else {
-      this.element.addEventListener('touchstart', this.handleStart, false);
+      this.element.addEventListener('touchstart', this.handleStart, this.listenerOptions);
       attachGlobalListenerTo.addEventListener('touchend', this.reset);
+    }
+  }
+
+  public removeListeners() {
+    if(!IS_TOUCH_SUPPORTED) {
+      this.element.removeEventListener('mousedown', this.handleStart, this.listenerOptions);
+      attachGlobalListenerTo.removeEventListener('mouseup', this.reset);
+    } else {
+      this.element.removeEventListener('touchstart', this.handleStart, this.listenerOptions);
+      attachGlobalListenerTo.removeEventListener('touchend', this.reset);
+    }
+  }
+
+  public setCursor(cursor: SwipeHandler['cursor']) {
+    this.cursor = cursor;
+    
+    if(!IS_TOUCH_SUPPORTED && this.hadMove) {
+      this.setCursorTo.style.setProperty('cursor', this.cursor, 'important');
     }
   }
 
@@ -48,11 +87,11 @@ export default class SwipeHandler {
       cancelEvent(e);
     } */
 
-    if(isTouchSupported) {
+    if(IS_TOUCH_SUPPORTED) {
       attachGlobalListenerTo.removeEventListener('touchmove', this.handleMove, {capture: true});
     } else {
       attachGlobalListenerTo.removeEventListener('mousemove', this.handleMove);
-      this.element.style.cursor = '';
+      this.setCursorTo.style.cursor = '';
     }
 
     if(this.onReset && this.hadMove) {
@@ -72,7 +111,7 @@ export default class SwipeHandler {
     this.xDown = e.clientX;
     this.yDown = e.clientY;
 
-    if(isTouchSupported) {
+    if(IS_TOUCH_SUPPORTED) {
       attachGlobalListenerTo.addEventListener('touchmove', this.handleMove, {passive: false, capture: true});
     } else {
       attachGlobalListenerTo.addEventListener('mousemove', this.handleMove, false);
@@ -80,11 +119,14 @@ export default class SwipeHandler {
   };
 
   handleMove = (_e: TouchEvent | MouseEvent) => {
-    if(this.xDown === null || this.yDown === null) {
-      return this.reset();
+    if(this.xDown === null || this.yDown === null || RESET_GLOBAL) {
+      this.reset();
+      return;
     }
 
-    cancelEvent(_e);
+    if(this.cancelEvent) {
+      cancelEvent(_e);
+    }
 
     const e = getEvent(_e);
     const xUp = e.clientX;
@@ -100,8 +142,8 @@ export default class SwipeHandler {
 
       this.hadMove = true;
 
-      if(!isTouchSupported) {
-        this.element.style.cursor = 'grabbing';
+      if(!IS_TOUCH_SUPPORTED) {
+        this.setCursorTo.style.setProperty('cursor', this.cursor, 'important');
       }
 
       if(this.onFirstSwipe) {
@@ -124,7 +166,8 @@ export default class SwipeHandler {
     // }
 
     /* reset values */
-    if(this.onSwipe(xDiff, yDiff)) {
+    const onSwipeResult = this.onSwipe(xDiff, yDiff, _e);
+    if(onSwipeResult !== undefined && onSwipeResult) {
       this.reset();
     }
   };

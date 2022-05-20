@@ -9,7 +9,6 @@ import AppSelectPeers from "../../appSelectPeers";
 import appDialogsManager from "../../../lib/appManagers/appDialogsManager";
 import appUsersManager from "../../../lib/appManagers/appUsersManager";
 import { MyDialogFilter as DialogFilter } from "../../../lib/storages/filters";
-import { copy } from "../../../helpers/object";
 import ButtonIcon from "../../buttonIcon";
 import CheckboxField from "../../checkboxField";
 import Button from "../../button";
@@ -19,6 +18,10 @@ import appMessagesManager from "../../../lib/appManagers/appMessagesManager";
 import RichTextProcessor from "../../../lib/richtextprocessor";
 import { SettingSection } from "..";
 import { toast } from "../../toast";
+import appPeersManager from "../../../lib/appManagers/appPeersManager";
+import copy from "../../../helpers/object/copy";
+import forEachReverse from "../../../helpers/array/forEachReverse";
+import setInnerHTML from "../../../helpers/dom/setInnerHTML";
 
 export default class AppIncludedChatsTab extends SliderSuperTab {
   private editFolderTab: AppEditFolderTab;
@@ -29,7 +32,7 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
   private filter: DialogFilter;
   private originalFilter: DialogFilter;
 
-  private dialogsByFilters: Map<DialogFilter, Set<number>>;
+  private dialogsByFilters: Map<DialogFilter, Set<PeerId>>;
 
   protected init() {
     this.content.remove();
@@ -64,39 +67,41 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
         }
       }
 
-      const peers: number[] = [];
+      const peerIds: PeerId[] = [];
       for(const key of selected) {
-        if(typeof(key) === 'number') {
-          peers.push(key);
+        if(key.isPeerId()) {
+          peerIds.push(key.toPeerId());
         } else {
           // @ts-ignore
           this.filter.pFlags[key] = true;
         }
       }
 
+      let cmp: (peerId: PeerId) => boolean;
       if(this.type === 'included') {
-        this.filter.pinned_peers = this.filter.pinned_peers.filter(peerId => {
-          return peers.includes(peerId); // * because I have pinned peer in include_peers too
-          /* const index = peers.indexOf(peerId);
-          if(index !== -1) {
-            peers.splice(index, 1);
-            return true;
-          } else {
-            return false;
-          } */
-        });
+        cmp = (peerId) => peerIds.includes(peerId);
       } else {
-        this.filter.pinned_peers = this.filter.pinned_peers.filter(peerId => {
-          return !peers.includes(peerId);
-        });
+        cmp = (peerId) => !peerIds.includes(peerId);
       }
 
-      const other = this.type === 'included' ? 'exclude_peers' : 'include_peers';
-      this.filter[other] = this.filter[other].filter(peerId => {
-        return !peers.includes(peerId);
+      forEachReverse(this.filter.pinnedPeerIds, (peerId, idx) => {
+        if(!cmp(peerId)) {
+          this.filter.pinnedPeerIds.splice(idx, 1);
+          this.filter.pinned_peers.splice(idx, 1);
+        }
+      });
+
+      const other = this.type === 'included' ? 'excludePeerIds' : 'includePeerIds';
+      const otherLegacy = this.type === 'included' ? 'exclude_peers' : 'include_peers';
+      forEachReverse(this.filter[other], (peerId, idx) => {
+        if(peerIds.includes(peerId)) {
+          this.filter[other].splice(idx, 1);
+          this.filter[otherLegacy].splice(idx, 1);
+        }
       });
       
-      this.filter[this.type === 'included' ? 'include_peers' : 'exclude_peers'] = peers;
+      this.filter[this.type === 'included' ? 'includePeerIds' : 'excludePeerIds'] = peerIds;
+      this.filter[this.type === 'included' ? 'include_peers' : 'exclude_peers'] = peerIds.map(peerId => appPeersManager.getInputPeerById(peerId));
       //this.filter.pinned_peers = this.filter.pinned_peers.filter(peerId => this.filter.include_peers.includes(peerId));
 
       this.editFolderTab.setFilter(this.filter, false);
@@ -106,7 +111,7 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
     this.dialogsByFilters = new Map();
     return appMessagesManager.filtersStorage.getDialogFilters().then(filters => {
       for(const filter of filters) {
-        this.dialogsByFilters.set(filter, new Set(appMessagesManager.dialogsStorage.getFolder(filter.id).map(d => d.peerId)));
+        this.dialogsByFilters.set(filter, new Set(appMessagesManager.dialogsStorage.getFolderDialogs(filter.id).map(d => d.peerId)));
       }
     });
   }
@@ -122,7 +127,7 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
     return checkboxField.label;
   }
 
-  renderResults = async(peerIds: number[]) => {
+  renderResults = async(peerIds: PeerId[]) => {
     //const other = this.type === 'included' ? this.filter.exclude_peers : this.filter.include_peers;
 
     await appUsersManager.getContacts();
@@ -145,7 +150,7 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
       this.dialogsByFilters.forEach((dialogs, filter) => {
         if(dialogs.has(peerId)) {
           const span = document.createElement('span');
-          span.innerHTML = RichTextProcessor.wrapEmojiText(filter.title);
+          setInnerHTML(span, RichTextProcessor.wrapEmojiText(filter.title));
           foundInFilters.push(span);
         }
       });
@@ -167,8 +172,6 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
     this.setTitle(this.type === 'included' ? 'FilterAlwaysShow' : 'FilterNeverShow');
 
     const filter = this.filter;
-
-    const fragment = document.createDocumentFragment();
 
     const categoriesSection = new SettingSection({
       noDelimiter: true,
@@ -203,22 +206,17 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
     }
     categoriesSection.content.append(f);
 
-    const chatsSection = new SettingSection({
-      name: 'FilterChats'
-    });
-
-    fragment.append(categoriesSection.container, chatsSection.container);
-
     /////////////////
 
-    const selectedPeers = (this.type === 'included' ? filter.include_peers : filter.exclude_peers).slice();
+    const selectedPeers = (this.type === 'included' ? filter.includePeerIds : filter.excludePeerIds).slice();
 
     this.selector = new AppSelectPeers({
       appendTo: this.container, 
       onChange: this.onSelectChange, 
       peerType: ['dialogs'], 
       renderResultsFunc: this.renderResults,
-      placeholder: 'Search'
+      placeholder: 'Search',
+      sectionNameLangPackKey: 'FilterChats'
     });
     this.selector.selected = new Set(selectedPeers);
 
@@ -245,9 +243,7 @@ export default class AppIncludedChatsTab extends SliderSuperTab {
       return div;
     };
 
-    const parent = this.selector.list.parentElement;
-    chatsSection.content.append(this.selector.list);
-    parent.append(fragment);
+    this.selector.scrollable.container.append(categoriesSection.container, this.selector.scrollable.container.lastElementChild);
 
     this.selector.addInitial(selectedPeers);
     addedInitial = true;

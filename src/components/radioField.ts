@@ -4,8 +4,8 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import getDeepProperty from "../helpers/object/getDeepProperty";
 import appStateManager from "../lib/appManagers/appStateManager";
-import { getDeepProperty } from "../helpers/object";
 import { LangPackKey, _i18n } from "../lib/langPack";
 
 export default class RadioField {
@@ -18,10 +18,15 @@ export default class RadioField {
     langKey?: LangPackKey,
     name: string, 
     value?: string, 
-    stateKey?: string
+    stateKey?: string,
+    alignRight?: boolean
   }) {
     const label = this.label = document.createElement('label');
     label.classList.add('radio-field');
+
+    if(options.alignRight) {
+      label.classList.add('radio-field-right');
+    }
   
     const input = this.input = document.createElement('input');
     input.type = 'radio';

@@ -20,7 +20,7 @@ avatar-element {
   /* overflow: hidden; */
   user-select: none;
   text-transform: uppercase;
-  font-weight: 700;
+  font-weight: var(--font-weight-bold);
 
   &[data-color="red"] {
     --color-top: var(--peer-avatar-red-top);
@@ -69,6 +69,10 @@ avatar-element {
     font-size: calc(21px / var(--multiplier)) !important; // ! IMPORTANT IS TEMPORARY
   }
 
+  &.tgico-reply_filled:before {
+    font-size: calc(28px / var(--multiplier)) !important; // ! IMPORTANT IS TEMPORARY
+  }
+
   /* &.tgico-savedmessages:before {
     font-size: calc(25px / var(--multiplier));
   } */
@@ -80,6 +84,10 @@ avatar-element {
   &:before {
     line-height: inherit !important;
   }
+
+  &.media-container {
+    position: relative;
+  }
   
   img {
     //width: 100% !important;
@@ -87,6 +95,7 @@ avatar-element {
     width: var(--size) !important;
     height: var(--size) !important;
     border-radius: inherit !important;
+    display: block; // fix Firefox below empty space
 
     &.fade-in {
       animation: fade-in-opacity .2s ease forwards;
@@ -124,6 +133,10 @@ avatar-element {
     cursor: pointer;
   }
 
+  &.avatar-relative {
+    position: relative;
+  }
+
   /* &.avatar-54 {
     width: 54px;
     height: 54px;
@@ -138,6 +151,8 @@ avatar-element {
       font-size: 56px;
     }
   } */
+
+  // * can get multiplier by diving 54 / X
   &.avatar-120 {
     --size: 120px;
     --multiplier: .45;
@@ -173,6 +188,11 @@ avatar-element {
     --multiplier: 1.35;
   }
 
+  &.avatar-35 {
+    --size: 35px;
+    --multiplier: 1.542857;
+  }
+
   &.avatar-34 {
     --size: 34px;
     --multiplier: 1.588235;
@@ -185,7 +205,13 @@ avatar-element {
 
   &.avatar-30 {
     --size: 30px;
-    --multiplier: 1.8;
+    // --multiplier: 1.8; // text won't be centered
+    --multiplier: 1.6875;
+  }
+
+  &.avatar-24 {
+    --size: 24px;
+    --multiplier: 2.25;
   }
 
   &.avatar-18 {
@@ -196,5 +222,29 @@ avatar-element {
   &.avatar-16 {
     --size: 16px;
     --multiplier: 3.375;
+  }
+}
+
+.avatar-relative {
+  .avatar-photo {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+}
+
+.avatar-full {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  .avatar-photo {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover;
   }
 }

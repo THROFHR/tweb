@@ -4,9 +4,6 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { formatDateAccordingToToday, months } from "../helpers/date";
-import { copy, getObjectKeysAndSort, safeAssign } from "../helpers/object";
-import { escapeRegExp, limitSymbols } from "../helpers/string";
 import appChatsManager from "../lib/appManagers/appChatsManager";
 import appDialogsManager from "../lib/appManagers/appDialogsManager";
 import appMessagesManager, { MyInputMessagesFilter, MyMessage } from "../lib/appManagers/appMessagesManager";
@@ -17,21 +14,19 @@ import appUsersManager from "../lib/appManagers/appUsersManager";
 import { logger } from "../lib/logger";
 import RichTextProcessor from "../lib/richtextprocessor";
 import rootScope from "../lib/rootScope";
-import AppMediaViewer from "./appMediaViewer";
 import { SearchGroup, SearchGroupType } from "./appSearch";
 import { horizontalMenu } from "./horizontalMenu";
 import LazyLoadQueue from "./lazyLoadQueue";
-import { putPreloader, formatPhoneNumber } from "./misc";
-import { ripple } from "./ripple";
+import { attachContextMenuListener, openBtnMenu, positionMenu, putPreloader } from "./misc";
+import ripple from "./ripple";
 import Scrollable, { ScrollableX } from "./scrollable";
 import { wrapDocument, wrapPhoto, wrapVideo } from "./wrappers";
 import useHeavyAnimationCheck, { getHeavyAnimationPromise } from "../hooks/useHeavyAnimationCheck";
-import { isSafari } from "../helpers/userAgent";
-import { LangPackKey, i18n } from "../lib/langPack";
+import I18n, { LangPackKey, i18n } from "../lib/langPack";
 import findUpClassName from "../helpers/dom/findUpClassName";
 import { getMiddleware } from "../helpers/middleware";
 import appProfileManager from "../lib/appManagers/appProfileManager";
-import { ChannelParticipant, ChatFull, ChatParticipant, ChatParticipants } from "../layer";
+import { ChannelParticipant, ChatFull, ChatParticipant, ChatParticipants, Message, MessageMedia, Photo, WebPage } from "../layer";
 import SortedUserList from "./sortedUserList";
 import findUpTag from "../helpers/dom/findUpTag";
 import appSidebarRight from "./sidebarRight";
@@ -39,13 +34,37 @@ import mediaSizes from "../helpers/mediaSizes";
 import appImManager from "../lib/appManagers/appImManager";
 import positionElementByIndex from "../helpers/dom/positionElementByIndex";
 import cleanSearchText from "../helpers/cleanSearchText";
+import { IS_TOUCH_SUPPORTED } from "../environment/touchSupport";
+import handleTabSwipe from "../helpers/dom/handleTabSwipe";
+import windowSize from "../helpers/windowSize";
+import { formatPhoneNumber } from "../helpers/formatPhoneNumber";
+import ButtonMenu, { ButtonMenuItemOptions } from "./buttonMenu";
+import PopupForward from "./popups/forward";
+import PopupDeleteMessages from "./popups/deleteMessages";
+import Row from "./row";
+import htmlToDocumentFragment from "../helpers/dom/htmlToDocumentFragment";
+import { SearchSelection } from "./chat/selection";
+import cancelEvent from "../helpers/dom/cancelEvent";
+import { attachClickEvent, simulateClickEvent } from "../helpers/dom/clickEvent";
+import { MyDocument } from "../lib/appManagers/appDocsManager";
+import AppMediaViewer from "./appMediaViewer";
+import lockTouchScroll from "../helpers/dom/lockTouchScroll";
+import copy from "../helpers/object/copy";
+import getObjectKeysAndSort from "../helpers/object/getObjectKeysAndSort";
+import safeAssign from "../helpers/object/safeAssign";
+import escapeRegExp from "../helpers/string/escapeRegExp";
+import limitSymbols from "../helpers/string/limitSymbols";
+import findAndSplice from "../helpers/array/findAndSplice";
+import { ScrollStartCallbackDimensions } from "../helpers/fastSmoothScroll";
+import setInnerHTML from "../helpers/dom/setInnerHTML";
+import appWebPagesManager from "../lib/appManagers/appWebPagesManager";
 
 //const testScroll = false;
 
 export type SearchSuperType = MyInputMessagesFilter/*  | 'members' */;
 export type SearchSuperContext = {
-  peerId: number,
-  inputFilter: MyInputMessagesFilter,
+  peerId: PeerId,
+  inputFilter: {_: MyInputMessagesFilter},
   query?: string,
   maxId?: number,
   folderId?: number,
@@ -66,6 +85,159 @@ export type SearchSuperMediaTab = {
   scroll?: {scrollTop: number, scrollHeight: number}
 };
 
+class SearchContextMenu {
+  private buttons: (ButtonMenuItemOptions & {verify?: () => boolean, withSelection?: true})[];
+  private element: HTMLElement;
+  private target: HTMLElement;
+  private peerId: PeerId;
+  private mid: number;
+  private isSelected: boolean;
+
+  constructor(
+    private attachTo: HTMLElement,
+    private searchSuper: AppSearchSuper
+  ) {
+    const onContextMenu = (e: MouseEvent) => {
+      if(this.init) {
+        this.init();
+        this.init = null;
+      }
+
+      let item: HTMLElement;
+      try {
+        item = findUpClassName(e.target, 'search-super-item');
+      } catch(e) {}
+
+      if(!item) return;
+
+      if(e instanceof MouseEvent) e.preventDefault();
+      if(this.element.classList.contains('active')) {
+        return false;
+      }
+      if(e instanceof MouseEvent) e.cancelBubble = true;
+
+      this.target = item;
+      this.peerId = item.dataset.peerId.toPeerId();
+      this.mid = +item.dataset.mid;
+      this.isSelected = searchSuper.selection.isMidSelected(this.peerId, this.mid);
+
+      this.buttons.forEach(button => {
+        let good: boolean;
+
+        if(this.isSelected && !button.withSelection) {
+          good = false;
+        } else {
+          good = button.verify ? button.verify() : true;
+        }
+
+        button.element.classList.toggle('hide', !good);
+      });
+
+      item.classList.add('menu-open');
+
+      positionMenu(e, this.element);
+      openBtnMenu(this.element, () => {
+        item.classList.remove('menu-open');
+      });
+    };
+
+    if(IS_TOUCH_SUPPORTED) {
+
+    } else {
+      attachContextMenuListener(attachTo, onContextMenu as any);
+    }
+  }
+
+  private init() {
+    this.buttons = [{
+      icon: 'forward',
+      text: 'Forward',
+      onClick: this.onForwardClick,
+      verify: () => appMessagesManager.canForward(appMessagesManager.getMessageByPeer(this.peerId, this.mid))
+    }, {
+      icon: 'forward',
+      text: 'Message.Context.Selection.Forward',
+      onClick: this.onForwardClick,
+      verify: () => this.isSelected && 
+        !this.searchSuper.selection.selectionForwardBtn.classList.contains('hide'),
+      withSelection: true
+    }, {
+      icon: 'message',
+      text: 'Message.Context.Goto',
+      onClick: this.onGotoClick,
+      withSelection: true
+    }, {
+      icon: 'select',
+      text: 'Message.Context.Select',
+      onClick: this.onSelectClick
+    }, {
+      icon: 'select',
+      text: 'Message.Context.Selection.Clear',
+      onClick: this.onClearSelectionClick,
+      verify: () => this.isSelected,
+      withSelection: true
+    }, {
+      icon: 'delete danger',
+      text: 'Delete',
+      onClick: this.onDeleteClick,
+      verify: () => appMessagesManager.canDeleteMessage(appMessagesManager.getMessageByPeer(this.peerId, this.mid))
+    }, {
+      icon: 'delete danger',
+      text: 'Message.Context.Selection.Delete',
+      onClick: this.onDeleteClick,
+      verify: () => this.isSelected && !this.searchSuper.selection.selectionDeleteBtn.classList.contains('hide'),
+      withSelection: true
+    }];
+
+    this.element = ButtonMenu(this.buttons);
+    this.element.classList.add('search-contextmenu', 'contextmenu');
+    document.getElementById('page-chats').append(this.element);
+  }
+
+  private onGotoClick = () => {
+    rootScope.dispatchEvent('history_focus', {
+      peerId: this.peerId,
+      mid: this.mid,
+      threadId: this.searchSuper.searchContext.threadId
+    });
+  };
+
+  private onForwardClick = () => {
+    if(this.searchSuper.selection.isSelecting) {
+      simulateClickEvent(this.searchSuper.selection.selectionForwardBtn);
+    } else {
+      new PopupForward({
+        [this.peerId]: [this.mid]
+      });
+    }
+  };
+
+  private onSelectClick = () => {
+    this.searchSuper.selection.toggleByElement(this.target);
+  };
+
+  private onClearSelectionClick = () => {
+    this.searchSuper.selection.cancelSelection();
+  };
+
+  private onDeleteClick = () => {
+    if(this.searchSuper.selection.isSelecting) {
+      simulateClickEvent(this.searchSuper.selection.selectionDeleteBtn);
+    } else {
+      new PopupDeleteMessages(this.peerId, [this.mid], 'chat');
+    }
+  };
+}
+
+export type ProcessSearchSuperResult = {
+  message: Message.message, 
+  middleware: () => boolean, 
+  promises: Promise<any>[], 
+  elemsToAppend: {element: HTMLElement, message: any}[],
+  inputFilter: MyInputMessagesFilter,
+  searchGroup?: SearchGroup
+};
+
 export default class AppSearchSuper {
   public tabs: {[t in SearchSuperType]: HTMLDivElement} = {} as any;
 
@@ -73,19 +245,20 @@ export default class AppSearchSuper {
 
   public container: HTMLElement;
   public nav: HTMLElement;
-  private navScrollableContainer: HTMLDivElement;
-  private tabsContainer: HTMLElement;
+  public navScrollableContainer: HTMLDivElement;
+  public tabsContainer: HTMLElement;
+  public navScrollable: ScrollableX;
   private tabsMenu: HTMLElement;
   private prevTabId = -1;
   
   private lazyLoadQueue = new LazyLoadQueue();
   public middleware = getMiddleware();
 
-  public historyStorage: Partial<{[type in SearchSuperType]: {mid: number, peerId: number}[]}> = {};
+  public historyStorage: Partial<{[type in SearchSuperType]: {mid: number, peerId: PeerId}[]}> = {};
   public usedFromHistory: Partial<{[type in SearchSuperType]: number}> = {};
   public urlsToRevoke: string[] = [];
 
-  private searchContext: SearchSuperContext;
+  public searchContext: SearchSuperContext;
   public loadMutex: Promise<any> = Promise.resolve();
 
   private nextRates: Partial<{[type in SearchSuperType]: number}> = {};
@@ -124,16 +297,25 @@ export default class AppSearchSuper {
   public onChangeTab?: (mediaTab: SearchSuperMediaTab) => void;
   public showSender? = false;
 
+  private searchContextMenu: SearchContextMenu;
+  public selection: SearchSelection;
+
+  public scrollStartCallback: (dimensions: ScrollStartCallbackDimensions) => void;
+
   constructor(options: Pick<AppSearchSuper, 'mediaTabs' | 'scrollable' | 'searchGroups' | 'asChatList' | 'groupByMonth' | 'hideEmptyTabs' | 'onChangeTab' | 'showSender'>) {
     safeAssign(this, options);
 
     this.container = document.createElement('div');
     this.container.classList.add('search-super');
 
+    this.searchContextMenu = new SearchContextMenu(this.container, this);
+    this.selection = new SearchSelection(this, appMessagesManager);
+
     const navScrollableContainer = this.navScrollableContainer = document.createElement('div');
     navScrollableContainer.classList.add('search-super-tabs-scrollable', 'menu-horizontal-scrollable', 'sticky');
 
-    const navScrollable = new ScrollableX(navScrollableContainer);
+    const navScrollable = this.navScrollable = new ScrollableX(navScrollableContainer);
+    navScrollable.container.classList.add('search-super-nav-scrollable');
 
     const nav = this.nav = document.createElement('nav');
     nav.classList.add('search-super-tabs', 'menu-horizontal-div');
@@ -164,9 +346,41 @@ export default class AppSearchSuper {
     this.tabsContainer = document.createElement('div');
     this.tabsContainer.classList.add('search-super-tabs-container', 'tabs-container');
 
+    let unlockScroll: ReturnType<typeof lockTouchScroll>;
+    if(IS_TOUCH_SUPPORTED) {
+      handleTabSwipe({
+        element: this.tabsContainer, 
+        onSwipe: (xDiff, yDiff, e) => {
+          const prevId = this.selectTab.prevId();
+          const children = Array.from(this.tabsMenu.children) as HTMLElement[];
+          let idx: number;
+          if(xDiff > 0) {
+            for(let i = prevId + 1; i < children.length; ++i) {
+              if(!children[i].classList.contains('hide')) {
+                idx = i;
+                break;
+              }
+            }
+          } else {
+            for(let i = prevId - 1; i >= 0; --i) {
+              if(!children[i].classList.contains('hide')) {
+                idx = i;
+                break;
+              }
+            }
+          }
+
+          if(idx !== undefined) {
+            unlockScroll = lockTouchScroll(this.tabsContainer);
+            this.selectTab(idx);
+          }
+        }
+      });
+    }
+
     for(const mediaTab of this.mediaTabs) {
       const container = document.createElement('div');
-      container.classList.add('search-super-container-' + mediaTab.type);
+      container.classList.add('search-super-container-' + mediaTab.type, 'tabs-tab');
 
       const content = document.createElement('div');
       content.classList.add('search-super-content-' + mediaTab.type);
@@ -187,7 +401,7 @@ export default class AppSearchSuper {
     this.searchGroupMedia = new SearchGroup(false, 'messages', true);
 
     this.scrollable.onScrolledBottom = () => {
-      if(this.mediaTab.contentTab && this.mediaTab.contentTab.childElementCount/* && false */) {
+      if(this.mediaTab.contentTab && !this.loaded[this.mediaTab.inputFilter]/* && false */) {
         //this.log('onScrolledBottom will load media');
         this.load(true);
       }
@@ -196,7 +410,11 @@ export default class AppSearchSuper {
 
     this.selectTab = horizontalMenu(this.tabsMenu, this.tabsContainer, (id, tabContent, animate) => {
       if(this.prevTabId === id && !this.skipScroll) {
-        this.scrollable.scrollIntoViewNew(this.container, 'start');
+        this.scrollable.scrollIntoViewNew({
+          element: this.container, 
+          position: 'start',
+          startCallback: this.scrollStartCallback
+        });
         return;
       }
       
@@ -218,7 +436,11 @@ export default class AppSearchSuper {
         const offsetTop = this.container.offsetTop;
         let scrollTop = this.scrollable.scrollTop;
         if(scrollTop < offsetTop) {
-          this.scrollable.scrollIntoViewNew(this.container, 'start');
+          this.scrollable.scrollIntoViewNew({
+            element: this.container, 
+            position: 'start',
+            startCallback: this.scrollStartCallback
+          });
           scrollTop = offsetTop;
         }
         
@@ -272,11 +494,24 @@ export default class AppSearchSuper {
         this.scrollable.scrollTop = this.mediaTab.scroll.scrollTop;
       }
 
+      if(unlockScroll) {
+        unlockScroll();
+        unlockScroll = undefined;
+      }
+
       this.onTransitionEnd();
     }, undefined, navScrollable);
 
-    this.tabs.inputMessagesFilterPhotoVideo.addEventListener('click', (e) => {
-      const target = findUpClassName(e.target as HTMLDivElement, 'grid-item');
+    attachClickEvent(this.tabsContainer, (e) => {
+      if(this.selection.isSelecting) {
+        cancelEvent(e);
+        this.selection.toggleByElement(findUpClassName(e.target, 'search-super-item'));
+      }
+    }, {capture: true, passive: false});
+    
+    const onMediaClick = (className: string, targetClassName: string, inputFilter: MyInputMessagesFilter, e: MouseEvent) => {
+      const target = findUpClassName(e.target as HTMLDivElement, className);
+      if(!target) return;
       
       const mid = +target.dataset.mid;
       if(!mid) {
@@ -284,10 +519,15 @@ export default class AppSearchSuper {
         return;
       }
 
-      const peerId = +target.dataset.peerId;
+      const peerId = target.dataset.peerId.toPeerId();
 
-      const targets = (Array.from(this.tabs.inputMessagesFilterPhotoVideo.querySelectorAll('.grid-item')) as HTMLElement[]).map(el => {
-        return {element: el, mid: +el.dataset.mid, peerId: +el.dataset.peerId};
+      const targets = (Array.from(this.tabs[inputFilter].querySelectorAll('.' + targetClassName)) as HTMLElement[]).map(el => {
+        const containerEl = findUpClassName(el, className);
+        return {
+          element: el, 
+          mid: +containerEl.dataset.mid, 
+          peerId: containerEl.dataset.peerId.toPeerId()
+        };
       });
 
       //const ids = Object.keys(this.mediaDivsByIds).map(k => +k).sort((a, b) => a - b);
@@ -295,9 +535,24 @@ export default class AppSearchSuper {
       
       const message = appMessagesManager.getMessageByPeer(peerId, mid);
       new AppMediaViewer()
-      .setSearchContext(this.copySearchContext(this.mediaTab.inputFilter))
-      .openMedia(message, target, 0, false, targets.slice(0, idx), targets.slice(idx + 1));
-    });
+      .setSearchContext(this.copySearchContext(inputFilter))
+      .openMedia(message, targets[idx].element, 0, false, targets.slice(0, idx), targets.slice(idx + 1));
+    };
+
+    attachClickEvent(this.tabs.inputMessagesFilterPhotoVideo, onMediaClick.bind(null, 'grid-item', 'grid-item', 'inputMessagesFilterPhotoVideo'));
+    attachClickEvent(this.tabs.inputMessagesFilterDocument, onMediaClick.bind(null, 'document-with-thumb', 'media-container', 'inputMessagesFilterDocument'));
+
+    /* attachClickEvent(this.tabs.inputMessagesFilterUrl, (e) => {
+      const target = e.target as HTMLElement;
+      if(target.tagName === 'A') {
+        return;
+      }
+
+      try {
+        const a = findUpClassName(target, 'row').querySelector('.anchor-url:last-child') as HTMLAnchorElement;
+        a.click();
+      } catch(err) {}
+    }); */
 
     this.mediaTab = this.mediaTabs[0];
 
@@ -309,126 +564,224 @@ export default class AppSearchSuper {
   }
 
   private onTransitionStart = () => {
-    // Jolly Cobra's // Workaround for scrollable content flickering during animation.
-    const container = this.scrollable.container;
-    if(container.style.overflowY !== 'hidden') {
-      // const scrollBarWidth = container.offsetWidth - container.clientWidth;
-      container.style.overflowY = 'hidden';
-      // container.style.paddingRight = `${scrollBarWidth}px`;
-      this.container.classList.add('sliding');
-    }
+    this.container.classList.add('sliding');
   };
 
   private onTransitionEnd = () => {
-    // Jolly Cobra's // Workaround for scrollable content flickering during animation.
-    const container = this.scrollable.container;
-
-    if(isSafari) { // ! safari doesn't respect sticky header, so it flicks when overflow is changing
-      container.style.display = 'none';
-    }
-
-    container.style.overflowY = '';
-
-    if(isSafari) {
-      void container.offsetLeft; // reflow
-      container.style.display = '';
-    }
-
-    // container.style.paddingRight = '0';
     this.container.classList.remove('sliding');
   };
 
   public filterMessagesByType(messages: any[], type: SearchSuperType): MyMessage[] {
-    if(type === 'inputMessagesFilterEmpty') return messages;
+    return appMessagesManager.filterMessagesByInputFilter(type, messages, messages.length);
+  }
 
-    if(type !== 'inputMessagesFilterUrl') {
-      messages = messages.filter(message => !!message.media);
-    }
+  private processEmptyFilter({message, searchGroup}: ProcessSearchSuperResult) {
+    const {dialog, dom} = appDialogsManager.addDialogNew({
+      dialog: message.peerId, 
+      container: searchGroup.list, 
+      drawStatus: false,
+      avatarSize: 54
+    });
 
-    /* if(!this.peerId) {
-      messages = messages.filter(message => {
-        if(message.peerId === rootScope.myId) {
-          return true;
-        }
+    appDialogsManager.setLastMessage(dialog, message, dom, this.searchContext.query);
+  }
 
-        const dialog = appMessagesManager.getDialogByPeerId(message.fromId)[0];
-        return dialog && dialog.folder_id === 0;
+  private processPhotoVideoFilter({message, promises, middleware, elemsToAppend}: ProcessSearchSuperResult) {
+    const media = appMessagesManager.getMediaFromMessage(message);
+
+    const div = document.createElement('div');
+    div.classList.add('grid-item');
+    //this.log(message, photo);
+
+    let wrapped: ReturnType<typeof wrapPhoto>;
+    const size = appPhotosManager.choosePhotoSize(media, 200, 200);
+    if(media._ !== 'photo') {
+      wrapped = wrapVideo({
+        doc: media,
+        message,
+        container: div,
+        boxWidth: 0,
+        boxHeight: 0,
+        lazyLoadQueue: this.lazyLoadQueue,
+        middleware,
+        onlyPreview: true,
+        withoutPreloader: true,
+        noPlayButton: true,
+        size
+      }).thumb;
+    } else {
+      wrapped = wrapPhoto({
+        photo: media,
+        message,
+        container: div,
+        boxWidth: 0,
+        boxHeight: 0,
+        lazyLoadQueue: this.lazyLoadQueue,
+        middleware,
+        withoutPreloader: true,
+        noBlur: true,
+        size
       });
-    } */
-
-    let filtered: any[] = [];
-
-    switch(type) {
-      case 'inputMessagesFilterPhotoVideo': {
-        for(let message of messages) {
-          let media = message.media.photo || message.media.document || (message.media.webpage && message.media.webpage.document);
-          if(!media) {
-            //this.log('no media!', message);
-            continue;
-          }
-          
-          if(media._ === 'document' && media.type !== 'video'/*  && media.type !== 'gif' */) {
-            //this.log('broken video', media);
-            continue;
-          }
-
-          filtered.push(message);
-        }
-        
-        break;
-      }
-
-      case 'inputMessagesFilterDocument': {
-        for(let message of messages) {
-          if(!message.media.document || ['voice', 'audio', 'gif', 'sticker', 'round'].includes(message.media.document.type)) {
-            continue;
-          }
-          
-          filtered.push(message);
-        }
-        break;
-      }
-
-      case 'inputMessagesFilterUrl': {
-        //this.log('inputMessagesFilterUrl', messages);
-        for(let message of messages) {
-          //if((message.media.webpage && message.media.webpage._ !== 'webPageEmpty')) {
-            filtered.push(message);
-          //}
-        }
-        
-        break;
-      }
-
-      case 'inputMessagesFilterMusic': {
-        for(let message of messages) {
-          if(!message.media.document || message.media.document.type !== 'audio') {
-            continue;
-          }
-
-          filtered.push(message);
-        }
-
-        break;
-      }
-
-      case 'inputMessagesFilterVoice': {
-        for(let message of messages) {
-          if(!message.media.document || message.media.document.type !== 'voice') {
-            continue;
-          }
-
-          filtered.push(message);
-        }
-
-        break;
-      }
-
-      default:
-        break;
     }
 
-    return filtered;
+    [wrapped.images.thumb, wrapped.images.full].filter(Boolean).forEach(image => {
+      image.classList.add('grid-item-media');
+    });
+
+    promises.push(wrapped.loadPromises.thumb);
+
+    elemsToAppend.push({element: div, message});
+  }
+
+  private processDocumentFilter({message, elemsToAppend, inputFilter}: ProcessSearchSuperResult) {
+    const document = appMessagesManager.getMediaFromMessage(message);
+    const showSender = this.showSender || (['voice', 'round'] as MyDocument['type'][]).includes(document.type);
+    const div = wrapDocument({
+      message,
+      withTime: !showSender,
+      fontWeight: 400,
+      voiceAsMusic: true,
+      showSender,
+      searchContext: this.copySearchContext(inputFilter),
+      lazyLoadQueue: this.lazyLoadQueue,
+      autoDownloadSize: 0
+    });
+
+    if((['audio', 'voice', 'round'] as MyDocument['type'][]).includes(document.type)) {
+      div.classList.add('audio-48');
+    }
+
+    elemsToAppend.push({element: div, message});
+  }
+
+  private processUrlFilter({message, promises, middleware, elemsToAppend}: ProcessSearchSuperResult) {
+    let webpage = (message.media as MessageMedia.messageMediaWebPage)?.webpage as WebPage.webPage;
+
+    if(!webpage) {
+      const entity = message.totalEntities ? message.totalEntities.find((e: any) => e._ === 'messageEntityUrl' || e._ === 'messageEntityTextUrl') : null;
+      let url: string, display_url: string, sliced: string;
+
+      if(!entity) {
+        //this.log.error('NO ENTITY:', message);
+        const match = RichTextProcessor.matchUrl(message.message);
+        if(!match) {
+          //this.log.error('NO ENTITY AND NO MATCH:', message);
+          return;
+        }
+
+        url = match[0];
+      } else {
+        sliced = message.message.slice(entity.offset, entity.offset + entity.length);
+      }
+
+      if(entity?._ === 'messageEntityTextUrl') {
+        url = entity.url;
+        //display_url = sliced;
+      } else {
+        url = url || sliced;
+      }
+
+      display_url = url;
+
+      const same = message.message === url;
+      if(!url.match(/^(ftp|http|https):\/\//)) {
+        display_url = 'https://' + url;
+        url = url.includes('@') ? url : 'https://' + url;
+      }
+
+      display_url = new URL(display_url).hostname;
+
+      webpage = {
+        _: 'webPage',
+        url,
+        display_url,
+        id: '',
+        hash: 0
+      };
+
+      if(!same) {
+        webpage.description = message.message;
+      }
+    }
+
+    let previewDiv = document.createElement('div');
+    previewDiv.classList.add('preview', 'row-media');
+    
+    //this.log('wrapping webpage', webpage);
+    
+    if(webpage.photo) {
+      const res = wrapPhoto({
+        container: previewDiv,
+        message: null,
+        photo: webpage.photo as Photo.photo,
+        boxWidth: 0,
+        boxHeight: 0,
+        withoutPreloader: true,
+        lazyLoadQueue: this.lazyLoadQueue,
+        middleware,
+        size: appPhotosManager.choosePhotoSize(webpage.photo as Photo.photo, 60, 60, false),
+        loadPromises: promises,
+        noBlur: true
+      });
+    } else {
+      previewDiv.classList.add('empty');
+      setInnerHTML(previewDiv, RichTextProcessor.getAbbreviation(webpage.title || webpage.display_url || webpage.description || webpage.url, true));
+    }
+    
+    let title = appWebPagesManager.wrapTitle(webpage);
+
+    const subtitleFragment = appWebPagesManager.wrapDescription(webpage);
+    const aFragment = htmlToDocumentFragment(RichTextProcessor.wrapRichText(webpage.url || ''));
+    const a = aFragment.firstElementChild;
+    if(a instanceof HTMLAnchorElement) {
+      try { // can have 'URIError: URI malformed'
+        a.innerText = decodeURIComponent(a.href);
+      } catch(err) {
+
+      }
+    }
+
+    if(subtitleFragment.firstChild) {
+      subtitleFragment.append('\n');
+    }
+
+    subtitleFragment.append(a);
+
+    if(this.showSender) {
+      subtitleFragment.append('\n', appMessagesManager.wrapSenderToPeer(message));
+    }
+    
+    if(!title.textContent) {
+      //title = new URL(webpage.url).hostname;
+      title.append(RichTextProcessor.wrapPlainText(webpage.display_url.split('/', 1)[0]));
+    }
+
+    const row = new Row({
+      title,
+      titleRight: appMessagesManager.wrapSentTime(message),
+      subtitle: subtitleFragment,
+      havePadding: true,
+      clickable: true,
+      noRipple: true
+    });
+
+    /* const mediaDiv = document.createElement('div');
+    mediaDiv.classList.add('row-media'); */
+
+    row.container.append(previewDiv);
+    
+    /* ripple(div);
+    div.append(previewDiv);
+    div.insertAdjacentHTML('beforeend', `
+    <div class="title">${title}${titleAdditionHTML}</div>
+    <div class="subtitle">${subtitle}</div>
+    <div class="url">${url}</div>
+    ${sender}
+    `); */
+    
+    if(row.container.innerText.trim().length) {
+      elemsToAppend.push({element: row.container, message});
+    }
   }
   
   public async performSearchResult(messages: any[], mediaTab: SearchSuperMediaTab, append = true) {
@@ -449,212 +802,62 @@ export default class AppSearchSuper {
       searchGroup = this.searchGroups.messages;
     }
 
+    const options: ProcessSearchSuperResult = {
+      elemsToAppend,
+      inputFilter,
+      message: undefined,
+      middleware,
+      promises,
+      searchGroup
+    };
+
+    let processCallback: (options: ProcessSearchSuperResult) => any;
+
     // https://core.telegram.org/type/MessagesFilter
     switch(inputFilter) {
       case 'inputMessagesFilterEmpty': {
-        for(const message of messages) {
-          const {dialog, dom} = appDialogsManager.addDialogNew({
-            dialog: message.peerId, 
-            container: searchGroup.list, 
-            drawStatus: false,
-            avatarSize: 54
-          });
-          appDialogsManager.setLastMessage(dialog, message, dom, this.searchContext.query);
-        }
-
-        if(searchGroup.list.childElementCount) {
-          searchGroup.setActive();
-        }
+        processCallback = this.processEmptyFilter;
         break;
       }
 
       case 'inputMessagesFilterPhotoVideo': {
-        for(const message of messages) {
-          const media = message.media.photo || message.media.document || (message.media.webpage && message.media.webpage.document);
-
-          const div = document.createElement('div');
-          div.classList.add('grid-item');
-          //this.log(message, photo);
-
-          let wrapped: ReturnType<typeof wrapPhoto>;
-          const size = appPhotosManager.choosePhotoSize(media, 200, 200);
-          if(media._ !== 'photo') {
-            wrapped = wrapVideo({
-              doc: media,
-              message,
-              container: div,
-              boxWidth: 0,
-              boxHeight: 0,
-              lazyLoadQueue: this.lazyLoadQueue,
-              middleware,
-              onlyPreview: true,
-              withoutPreloader: true,
-              noPlayButton: true,
-              size
-            }).thumb;
-          } else {
-            wrapped = wrapPhoto({
-              photo: media,
-              message,
-              container: div,
-              boxWidth: 0,
-              boxHeight: 0,
-              lazyLoadQueue: this.lazyLoadQueue,
-              middleware,
-              withoutPreloader: true,
-              noBlur: true,
-              size
-            });
-          }
-
-          [wrapped.images.thumb, wrapped.images.full].filter(Boolean).forEach(image => {
-            image.classList.add('grid-item-media');
-          });
-
-          promises.push(wrapped.loadPromises.thumb);
-
-          elemsToAppend.push({element: div, message});
-        }
-        
+        processCallback = this.processPhotoVideoFilter;
         break;
       }
       
       case 'inputMessagesFilterVoice':
+      case 'inputMessagesFilterRoundVoice':
       case 'inputMessagesFilterMusic':
       case 'inputMessagesFilterDocument': {
-        for(const message of messages) {
-          const showSender = this.showSender || message.media.document.type === 'voice';
-          const div = wrapDocument({
-            message,
-            withTime: !showSender,
-            fontWeight: 400,
-            voiceAsMusic: true,
-            showSender: showSender,
-            searchContext: this.copySearchContext(inputFilter)
-          });
-
-          if(['audio', 'voice'].includes(message.media.document.type)) {
-            div.classList.add('audio-48');
-          }
-
-          elemsToAppend.push({element: div, message});
-        }
+        processCallback = this.processDocumentFilter;
         break;
       }
       
       case 'inputMessagesFilterUrl': {
-        for(let message of messages) {
-          let webpage: any;
-
-          if(message.media?.webpage && message.media.webpage._ !== 'webPageEmpty') {
-            webpage = message.media.webpage;
-          } else {
-            const entity = message.totalEntities ? message.totalEntities.find((e: any) => e._ === 'messageEntityUrl' || e._ === 'messageEntityTextUrl') : null;
-            let url: string, display_url: string, sliced: string;
-
-            if(!entity) {
-              //this.log.error('NO ENTITY:', message);
-              const match = RichTextProcessor.matchUrl(message.message);
-              if(!match) {
-                //this.log.error('NO ENTITY AND NO MATCH:', message);
-                continue;
-              }
-
-              url = match[0];
-            } else {
-              sliced = message.message.slice(entity.offset, entity.offset + entity.length);
-            }
-
-            if(entity?._ === 'messageEntityTextUrl') {
-              url = entity.url;
-              //display_url = sliced;
-            } else {
-              url = url || sliced;
-            }
-
-            display_url = url;
-
-            const same = message.message === url;
-            if(!url.match(/^(ftp|http|https):\/\//)) {
-              display_url = 'https://' + url;
-              url = url.includes('@') ? url : 'https://' + url;
-            }
-
-            display_url = new URL(display_url).hostname;
-
-            webpage = {
-              url,
-              display_url
-            };
-
-            if(!same) {
-              webpage.description = message.message;
-              webpage.rDescription = RichTextProcessor.wrapRichText(limitSymbols(message.message, 150, 180));
-            }
-          }
-
-          let div = document.createElement('div');
-          
-          let previewDiv = document.createElement('div');
-          previewDiv.classList.add('preview');
-          
-          //this.log('wrapping webpage', webpage);
-          
-          if(webpage.photo) {
-            const res = wrapPhoto({
-              container: previewDiv,
-              message: null,
-              photo: webpage.photo,
-              boxWidth: 0,
-              boxHeight: 0,
-              withoutPreloader: true,
-              lazyLoadQueue: this.lazyLoadQueue,
-              middleware,
-              size: appPhotosManager.choosePhotoSize(webpage.photo, 60, 60, false),
-              loadPromises: promises,
-              noBlur: true
-            });
-          } else {
-            previewDiv.classList.add('empty');
-            previewDiv.innerHTML = RichTextProcessor.getAbbreviation(webpage.title || webpage.display_url || webpage.description || webpage.url, true);
-          }
-          
-          let title = webpage.rTitle || '';
-          let subtitle = webpage.rDescription || '';
-          let url = RichTextProcessor.wrapRichText(webpage.url || '');
-          
-          if(!title) {
-            //title = new URL(webpage.url).hostname;
-            title = RichTextProcessor.wrapPlainText(webpage.display_url.split('/', 1)[0]);
-          }
-
-          let sender = this.showSender ? `<div class="subtitle sender">${appMessagesManager.getSenderToPeerText(message)}</div>` : '';
-
-          let titleAdditionHTML = '';
-          if(this.showSender) {
-            titleAdditionHTML = `<div class="sent-time">${formatDateAccordingToToday(new Date(message.date * 1000))}</div>`;
-          }
-
-          div.append(previewDiv);
-          div.insertAdjacentHTML('beforeend', `
-          <div class="title">${title}${titleAdditionHTML}</div>
-          <div class="subtitle">${subtitle}</div>
-          <div class="url">${url}</div>
-          ${sender}
-          `);
-          
-          if(div.innerText.trim().length) {
-            elemsToAppend.push({element: div, message});
-          }
-          
-        }
-        
+        processCallback = this.processUrlFilter;
         break;
       }
 
       default:
         //this.log.warn('death is my friend', messages);
         break;
+    }
+
+    if(processCallback) {
+      processCallback = processCallback.bind(this);
+
+      for(const message of messages) {
+        try {
+          options.message = message;
+          processCallback(options);
+        } catch(err) {
+          this.log.error('error rendering filter', inputFilter, options, message, err);
+        }
+      }
+    }
+    
+    if(searchGroup && searchGroup.list.childElementCount) {
+      searchGroup.setActive();
     }
 
     if(this.loadMutex) {
@@ -678,6 +881,10 @@ export default class AppSearchSuper {
         element.dataset.mid = '' + message.mid;
         element.dataset.peerId = '' + message.peerId;
         monthContainer.items[method](element);
+
+        if(this.selection.isSelecting) {
+          this.selection.toggleElementCheckbox(element, true);
+        }
       });
     }
     
@@ -706,7 +913,7 @@ export default class AppSearchSuper {
   }
 
   private loadChats() {
-    const renderedPeerIds: Set<number> = new Set();
+    const renderedPeerIds: Set<PeerId> = new Set();
     const middleware = this.middleware.get();
 
     for(let i in this.searchGroups) {
@@ -717,7 +924,7 @@ export default class AppSearchSuper {
 
     const query = this.searchContext.query;
     if(query) {
-      const setResults = (results: number[], group: SearchGroup, showMembersCount = false) => {
+      const setResults = (results: PeerId[], group: SearchGroup, showMembersCount = false) => {
         results.forEach((peerId) => {
           if(renderedPeerIds.has(peerId)) {
             return;
@@ -740,7 +947,7 @@ export default class AppSearchSuper {
           if(showMembersCount && (peer.participants_count || peer.participants)) {
             const regExp = new RegExp(`(${escapeRegExp(query)}|${escapeRegExp(cleanSearchText(query))})`, 'gi');
             dom.titleSpan.innerHTML = dom.titleSpan.innerHTML.replace(regExp, '<i>$1</i>');
-            dom.lastMessageSpan.append(appChatsManager.getChatMembersString(-peerId));
+            dom.lastMessageSpan.append(appProfileManager.getChatMembersString(peerId.toChatId()));
           } else if(peerId === rootScope.myId) {
             dom.lastMessageSpan.append(i18n('Presence.YourChat'));
           } else {
@@ -772,7 +979,7 @@ export default class AppSearchSuper {
       };
   
       return Promise.all([
-        appUsersManager.getContacts(query, true)
+        appUsersManager.getContactsPeerIds(query, true)
         .then(onLoad)
         .then((contacts) => {
           if(contacts) {
@@ -787,26 +994,30 @@ export default class AppSearchSuper {
             setResults(contacts.my_results, this.searchGroups.contacts, true);
             setResults(contacts.results/* .concat(contacts.results, contacts.results, contacts.results) */, this.searchGroups.globalContacts);
 
-            if(this.searchGroups.globalContacts.nameEl.lastElementChild) {
+            this.searchGroups.globalContacts.container.classList.add('is-short');
+
+            if(this.searchGroups.globalContacts.nameEl.lastElementChild !== this.searchGroups.globalContacts.nameEl.firstElementChild) {
               this.searchGroups.globalContacts.nameEl.lastElementChild.remove();
             }
-
-            this.searchGroups.globalContacts.container.classList.add('is-short');
             
             if(this.searchGroups.globalContacts.list.childElementCount > 3) {
               const showMore = document.createElement('div');
               showMore.classList.add('search-group__show-more');
-              showMore.innerText = 'Show more';
+              const intlElement = new I18n.IntlElement({
+                key: 'Separator.ShowMore'
+              });
+              showMore.append(intlElement.element);
               this.searchGroups.globalContacts.nameEl.append(showMore);
-              showMore.addEventListener('click', () => {
+              attachClickEvent(showMore, () => {
                 const isShort = this.searchGroups.globalContacts.container.classList.toggle('is-short');
-                showMore.innerText = isShort ? 'Show more' : 'Show less';
+                intlElement.key = isShort ? 'Separator.ShowMore' : 'Separator.ShowLess';
+                intlElement.update();
               });
             }
           }
         }),
   
-        appMessagesManager.getConversations(query, 0, 20, 0)
+        appMessagesManager.getConversations(query, 0, 20, 0).promise
         .then(onLoad)
         .then(value => {
           if(value) {
@@ -833,7 +1044,7 @@ export default class AppSearchSuper {
               autonomous: true
             });
     
-            dom.lastMessageSpan.append(peerId > 0 ? appUsersManager.getUserStatusString(peerId) : appChatsManager.getChatMembersString(peerId));
+            dom.lastMessageSpan.append(peerId.isUser() ? appUsersManager.getUserStatusString(peerId) : appProfileManager.getChatMembersString(peerId.toChatId()));
           });
     
           if(!state.recentSearch.length) {
@@ -845,14 +1056,19 @@ export default class AppSearchSuper {
       };
 
       return Promise.all([
-        appUsersManager.getTopPeers().then(peers => {
+        appUsersManager.getTopPeers('correspondents').then(peers => {
           if(!middleware()) return;
 
+          const idx = peers.findIndex(peer => peer.id === rootScope.myId);
+          if(idx !== -1) {
+            peers = peers.slice();
+            peers.splice(idx, 1);
+          }
           //console.log('got top categories:', categories);
           if(peers.length) {
-            peers.forEach((peerId) => {
+            peers.forEach((peer) => {
               appDialogsManager.addDialogNew({
-                dialog: peerId, 
+                dialog: peer.id, 
                 container: this.searchGroups.people.list, 
                 drawStatus: false,
                 onlyFirstName: true,
@@ -871,7 +1087,7 @@ export default class AppSearchSuper {
   }
 
   private loadMembers(mediaTab: SearchSuperMediaTab) {
-    const id = -this.searchContext.peerId;
+    const id = this.searchContext.peerId.toChatId();
     const middleware = this.middleware.get();
     let promise: Promise<void>;
 
@@ -885,22 +1101,21 @@ export default class AppSearchSuper {
       }
       
       if(!this.membersList) {
-        this.membersList = new SortedUserList();
-        this.membersList.lazyLoadQueue = this.lazyLoadQueue;
-        this.membersList.list.addEventListener('click', (e) => {
+        this.membersList = new SortedUserList({lazyLoadQueue: this.lazyLoadQueue, rippleEnabled: false});
+        attachClickEvent(this.membersList.list, (e) => {
           const li = findUpTag(e.target, 'LI');
           if(!li) {
             return;
           }
 
-          const peerId = +li.dataset.peerId;
+          const peerId = li.dataset.peerId.toPeerId();
           let promise: Promise<any> = Promise.resolve();
           if(mediaSizes.isMobile) {
             promise = appSidebarRight.toggleSidebar(false);
           }
           
           promise.then(() => {
-            appImManager.setInnerPeer(peerId);
+            appImManager.setInnerPeer({peerId});
           });
         });
         mediaTab.contentTab.append(this.membersList.list);
@@ -909,7 +1124,7 @@ export default class AppSearchSuper {
 
       participants.forEach(participant => {
         const peerId = appChatsManager.getParticipantPeerId(participant);
-        if(peerId < 0) {
+        if(peerId.isAnyChat()) {
           return;
         }
 
@@ -939,14 +1154,14 @@ export default class AppSearchSuper {
         return renderParticipants(participants.participants);
       });
     } else {
-      promise = (appProfileManager.getChatFull(id) as Promise<ChatFull.chatFull>).then(chatFull => {
+      promise = Promise.resolve(appProfileManager.getChatFull(id)).then(chatFull => {
         if(!middleware()) {
           return;
         }
 
         //console.log('anymore', chatFull);
         this.loaded[mediaTab.inputFilter] = true;
-        const participants = chatFull.participants;
+        const participants = (chatFull as ChatFull.chatFull).participants;
         if(participants._ === 'chatParticipantsForbidden') {
           return;
         }
@@ -1031,16 +1246,11 @@ export default class AppSearchSuper {
     
     //let loadCount = history.length ? 50 : 15;
     return this.loadPromises[type] = appMessagesManager.getSearch({
-      peerId: this.searchContext.peerId, 
-      query: this.searchContext.query,
+      ...this.searchContext,
       inputFilter: {_: type},
       maxId, 
       limit: loadCount,
-      nextRate: this.nextRates[type] ?? (this.nextRates[type] = 0),
-      threadId: this.searchContext.threadId,
-      folderId: this.searchContext.folderId,
-      minDate: this.searchContext.minDate,
-      maxDate: this.searchContext.maxDate
+      nextRate: this.nextRates[type] ?? (this.nextRates[type] = 0)
     }).then(value => {
       history.push(...value.history.map(m => ({mid: m.mid, peerId: m.peerId})));
       
@@ -1052,7 +1262,7 @@ export default class AppSearchSuper {
       }
 
       // ! Фикс случая, когда не загружаются документы при открытой панели разработчиков (происходит из-за того, что не совпадают критерии отбора документов в getSearch)
-      if(value.history.length < loadCount) {
+      if(value.history.length < loadCount || (this.searchContext.folderId !== undefined && !value.next_rate) || value.history.length === value.count) {
       //if((value.count || history.length === value.count) && history.length >= value.count) {
         //this.log(logStr + 'loaded all media', value, loadCount);
         this.loaded[type] = true;
@@ -1170,15 +1380,15 @@ export default class AppSearchSuper {
       return !this.loaded[inputFilter] || (this.historyStorage[inputFilter] && this.usedFromHistory[inputFilter] < this.historyStorage[inputFilter].length);
     });
 
-    if(peerId > 0) {
-      toLoad.findAndSplice(mediaTab => mediaTab.type === 'members');
+    if(peerId.isUser()) {
+      findAndSplice(toLoad, mediaTab => mediaTab.type === 'members');
     }
 
     if(!toLoad.length) {
       return;
     }
 
-    const loadCount = justLoad ? 50 : Math.round((appPhotosManager.windowH / 130 | 0) * 3 * 1.25); // that's good for all types
+    const loadCount = justLoad ? 50 : Math.round((windowSize.height / 130 | 0) * 3 * 1.25); // that's good for all types
 
     const promises: Promise<any>[] = toLoad.map(mediaTab => {
       return this.loadType(mediaTab, justLoad, loadCount, middleware)
@@ -1196,14 +1406,26 @@ export default class AppSearchSuper {
     const dateTimestamp = date.getTime();
     const containers = this.monthContainers[type] ?? (this.monthContainers[type] = {});
     if(!(dateTimestamp in containers)) {
-      const str = months[date.getMonth()] + ' ' + date.getFullYear();
-      
       const container = document.createElement('div');
       container.className = 'search-super-month';
 
       const name = document.createElement('div');
       name.classList.add('search-super-month-name');
-      name.innerText = str;
+
+      const options: Intl.DateTimeFormatOptions = {
+        month: 'long'
+      };
+
+      if(date.getFullYear() !== new Date().getFullYear()) {
+        options.year = 'numeric';
+      }
+
+      const dateElement = new I18n.IntlDateElement({
+        date,
+        options
+      }).element;
+      name.append(dateElement);
+
       container.append(name);
 
       const items = document.createElement('div');
@@ -1228,7 +1450,7 @@ export default class AppSearchSuper {
   }
 
   public canViewMembers() {
-    return this.searchContext.peerId < 0 && !appChatsManager.isBroadcast(-this.searchContext.peerId) && appChatsManager.hasRights(-this.searchContext.peerId, 'view_participants');
+    return this.searchContext.peerId.isAnyChat() && !appChatsManager.isBroadcast(this.searchContext.peerId.toChatId()) && appChatsManager.hasRights(this.searchContext.peerId.toChatId(), 'view_participants');
   }
 
   public cleanup() {
@@ -1243,6 +1465,10 @@ export default class AppSearchSuper {
     this.mediaTabs.forEach(mediaTab => {
       this.usedFromHistory[mediaTab.inputFilter] = -1;
     });
+
+    if(this.selection.isSelecting) {
+      this.selection.cancelSelection();
+    }
 
     // * must go to first tab (это костыль)
     /* const membersTab = this.mediaTabsMap.get('members');
@@ -1328,13 +1554,13 @@ export default class AppSearchSuper {
 
   private copySearchContext(newInputFilter: MyInputMessagesFilter) {
     const context = copy(this.searchContext);
-    context.inputFilter = newInputFilter;
+    context.inputFilter = {_: newInputFilter};
     context.nextRate = this.nextRates[newInputFilter];
     return context;
   }
 
   public setQuery({peerId, query, threadId, historyStorage, folderId, minDate, maxDate}: {
-    peerId: number, 
+    peerId: PeerId, 
     query?: string, 
     threadId?: number, 
     historyStorage?: AppSearchSuper['historyStorage'], 
@@ -1343,9 +1569,9 @@ export default class AppSearchSuper {
     maxDate?: number
   }) {
     this.searchContext = {
-      peerId: peerId || 0,
+      peerId,
       query: query || '',
-      inputFilter: this.mediaTab.inputFilter,
+      inputFilter: {_: this.mediaTab.inputFilter},
       threadId,
       folderId,
       minDate,

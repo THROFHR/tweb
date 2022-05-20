@@ -56,10 +56,12 @@
     }
 
     &-background {
-      top: -15%;
+      // it is needed for circle scale animation
+      top: -15%; 
       right: -15%;
       bottom: -15%;
       left: -15%;
+      
       background-color: var(--primary-color);
       transform: scale(1);
       border-radius: 50%;
@@ -85,6 +87,7 @@
         stroke-dasharray: 24.19, 24.19;
         stroke-dashoffset: 0;
         transition: stroke-dasharray .1s .15s ease-in-out, visibility 0s .15s;
+        visibility: visible; // fix blinking on parent's transform
         
         @include animation-level(0) {
           transition: none !important;
@@ -103,7 +106,8 @@
     line-height: 26px;
     user-select: none;
     transition: .2s opacity;
-    color: var(--primary-text-color);
+    // color: var(--primary-text-color);
+    color: inherit;
 
     @include animation-level(0) {
       transition: none;
@@ -138,6 +142,14 @@
 
   .checkbox-box {
     border-radius: 50%;
+    overflow: auto;
+
+    &-background {
+      top: 0;
+      right: 0;
+      bottom: 0;
+      left: 0;
+    }
 
     &-border {
       border: 2px solid var(--secondary-color);
@@ -147,6 +159,10 @@
     &-check {
       --offset: calc(var(--size) - (var(--size) / 2 + .125rem));
     }
+
+    html.is-safari & {
+      -webkit-mask-image: none;
+    }
   }
 }
 
@@ -155,7 +171,7 @@
 	position: relative;
 	text-align: left;
 	margin: 1.25rem 0;
-	line-height: 1.3125; // omg it centers the text
+	line-height: var(--line-height); // omg it centers the text
   cursor: pointer;
   
   &.hidden-widget {
@@ -186,9 +202,11 @@
   .radio-field-main {
     padding-left: 3.5rem;
     position: relative;
-    color: var(--primary-text-color);
+    // color: var(--primary-text-color);
+    color: inherit;
 
-    &::before, &::after {
+    &::before, 
+    &::after {
       content: '';
       display: block;
       position: absolute;
@@ -197,17 +215,16 @@
       width: var(--size);
       height: var(--size);
       transform: translateY(-50%);
-
-      @include animation-level(0) {
-        transition: none;
-      }
     }
 
     &::before {
       border: 2px solid var(--secondary-text-color);
       border-radius: 50%;
       opacity: 1;
-      transition: border-color .1s ease, opacity .1s ease;
+
+      @include animation-level(2) {
+        transition: border-color .1s ease, opacity .1s ease;
+      }
     }
 
     &::after {
@@ -218,13 +235,30 @@
       background: var(--primary-color);
       transform: translateY(-50%) scale(0);
       transform-origin: center;
-      transition: transform .1s ease;
+
+      @include animation-level(2) {
+        transition: transform .1s ease;
+      }
     }
 
     /* &-subtitle {
       color: var(--secondary-text-color) !important;
       font-size: 14px !important;
     } */
+  }
+
+  &.radio-field-right {
+    .radio-field-main {
+      &:before {
+        left: auto;
+        right: 0;
+      }
+
+      &:after {
+        left: auto;
+        right: .3125rem;
+      }
+    }
   }
 
   /* &-with-subtitle {
@@ -246,7 +280,7 @@
   position: absolute;
 }
 
-.checkbox-field [type="checkbox"] {
+.checkbox-field .checkbox-field-input {
   &:not(:checked) + .checkbox-box {
     .checkbox-box-check {
       use {
@@ -329,19 +363,25 @@
     position: relative;
     display: flex;
     align-items: center;
-    transition: background-color .1s;
     margin: 0 var(--offset);
+    
+    @include animation-level(2) {
+      transition: background-color .1s;
+    }
 
     &:before {
       width: 1.25rem;
       height: 1.25rem;
       border: 2px solid var(--secondary-color);
-      transition: border-color .1s, transform .1s;
       background-color: var(--surface-color);
       content: " ";
       transform: translateX(calc(var(--offset) * -1));
       border-radius: 50%;
       position: absolute;
+      
+      @include animation-level(2) {
+        transition: border-color .1s, transform .1s;
+      }
     }
   }
 

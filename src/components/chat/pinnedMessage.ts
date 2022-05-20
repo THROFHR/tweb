@@ -15,12 +15,13 @@ import rootScope from "../../lib/rootScope";
 import Chat from "./chat";
 import ListenerSetter from "../../helpers/listenerSetter";
 import ButtonIcon from "../buttonIcon";
-import { debounce } from "../../helpers/schedulers";
 import { getHeavyAnimationPromise } from "../../hooks/useHeavyAnimationCheck";
 import { i18n } from "../../lib/langPack";
-import { cancelEvent } from "../../helpers/dom/cancelEvent";
+import cancelEvent from "../../helpers/dom/cancelEvent";
 import { attachClickEvent } from "../../helpers/dom/clickEvent";
 import handleScrollSideEvent from "../../helpers/dom/handleScrollSideEvent";
+import debounce from "../../helpers/schedulers/debounce";
+import throttle from "../../helpers/schedulers/throttle";
 
 class AnimatedSuper {
   static DURATION = 200;
@@ -213,84 +214,97 @@ class AnimatedCounter {
 }
 
 export default class ChatPinnedMessage {
-  public static LOAD_COUNT = 50;
-  public static LOAD_OFFSET = 5;
+  private static LOAD_COUNT = 50;
+  private static LOAD_OFFSET = 5;
 
   public pinnedMessageContainer: PinnedContainer;
-  public pinnedMessageBorder: PinnedMessageBorder;
+  private pinnedMessageBorder: PinnedMessageBorder;
 
-  public pinnedMaxMid = 0;
+  private pinnedMaxMid = 0;
   public pinnedMid = 0;
   public pinnedIndex = -1;
-  public wasPinnedIndex = 0;
-  public wasPinnedMediaIndex = 0;
+  private wasPinnedIndex = 0;
+  private wasPinnedMediaIndex = 0;
   
   public locked = false;
-  public waitForScrollBottom = false;
+  private waitForScrollBottom = false;
 
   public count = 0;
-  public mids: number[] = [];
-  public offsetIndex = 0;
+  private mids: number[] = [];
+  private offsetIndex = 0;
 
-  public loading = false;
-  public loadedBottom = false;
-  public loadedTop = false;
+  private loading = false;
+  private loadedBottom = false;
+  private loadedTop = false;
 
-  public animatedSubtitle: AnimatedSuper;
-  public animatedMedia: AnimatedSuper;
-  public animatedCounter: AnimatedCounter;
+  private animatedSubtitle: AnimatedSuper;
+  private animatedMedia: AnimatedSuper;
+  private animatedCounter: AnimatedCounter;
 
-  public listenerSetter: ListenerSetter;
-  public scrollDownListenerSetter: ListenerSetter = null;
+  private listenerSetter: ListenerSetter;
+  private scrollDownListenerSetter: ListenerSetter = null;
 
   public hidden = false;
 
-  public getCurrentIndexPromise: Promise<any> = null;
-  public btnOpen: HTMLButtonElement;
+  private getCurrentIndexPromise: Promise<any> = null;
+  private btnOpen: HTMLButtonElement;
   
-  public setPinnedMessage: () => void;
+  private setPinnedMessage: () => void;
 
   private isStatic = false;
 
   private debug = false;
   
+  public setCorrectIndexThrottled: (lastScrollDirection?: number) => void;
+  
   constructor(private topbar: ChatTopbar, private chat: Chat, private appMessagesManager: AppMessagesManager, private appPeersManager: AppPeersManager) {
     this.listenerSetter = new ListenerSetter();
 
-    this.pinnedMessageContainer = new PinnedContainer(topbar, chat, this.listenerSetter, 'message', new ReplyContainer('pinned-message'), async() => {
-      if(appPeersManager.canPinMessage(this.topbar.peerId)) {
-        new PopupPinMessage(this.topbar.peerId, this.pinnedMid, true);
-      } else {
-        new PopupPinMessage(this.topbar.peerId, 0, true);
-      }
+    const dAC = new ReplyContainer('pinned-message');
+    this.pinnedMessageContainer = new PinnedContainer({
+      topbar, 
+      chat, 
+      listenerSetter: this.listenerSetter, 
+      className: 'message', 
+      divAndCaption: dAC, 
+      onClose: async() => {
+        if(appPeersManager.canPinMessage(this.topbar.peerId)) {
+          new PopupPinMessage(this.topbar.peerId, this.pinnedMid, true);
+        } else {
+          new PopupPinMessage(this.topbar.peerId, 0, true);
+        }
 
-      return false;
+        return false;
+      }
     });
 
     this.pinnedMessageBorder = new PinnedMessageBorder();
-    this.pinnedMessageContainer.divAndCaption.border.replaceWith(this.pinnedMessageBorder.render(1, 0));
+    dAC.border.replaceWith(this.pinnedMessageBorder.render(1, 0));
 
     this.animatedSubtitle = new AnimatedSuper();
-    this.pinnedMessageContainer.divAndCaption.subtitle.append(this.animatedSubtitle.container);
+    dAC.subtitle.append(this.animatedSubtitle.container);
 
     this.animatedMedia = new AnimatedSuper();
     this.animatedMedia.container.classList.add('pinned-message-media-container');
-    this.pinnedMessageContainer.divAndCaption.content.prepend(this.animatedMedia.container);
+    dAC.content.prepend(this.animatedMedia.container);
 
     this.animatedCounter = new AnimatedCounter(true);
-    this.pinnedMessageContainer.divAndCaption.title.append(i18n('PinnedMessage'), ' ', this.animatedCounter.container);
+    dAC.title.append(i18n('PinnedMessage'), ' ', this.animatedCounter.container);
+
+    const btnClose = this.pinnedMessageContainer.btnClose.cloneNode(true) as HTMLElement;
+    this.pinnedMessageContainer.attachOnCloseEvent(btnClose);
+    dAC.container.prepend(btnClose);
 
     this.btnOpen = ButtonIcon('pinlist pinned-container-close pinned-message-pinlist', {noRipple: true});
-    this.pinnedMessageContainer.divAndCaption.container.prepend(this.btnOpen);
+
+    this.pinnedMessageContainer.wrapperUtils.prepend(this.btnOpen);
 
     attachClickEvent(this.btnOpen, (e) => {
       cancelEvent(e);
       this.topbar.openPinned(true);
     }, {listenerSetter: this.listenerSetter});
 
-    this.listenerSetter.add(rootScope, 'peer_pinned_messages', (e) => {
-      const peerId = e.peerId;
-
+    this.listenerSetter.add(rootScope)('peer_pinned_messages', ({peerId}) => {
       if(peerId === this.topbar.peerId) {
         //this.wasPinnedIndex = 0;
         //setTimeout(() => {
@@ -310,9 +324,7 @@ export default class ChatPinnedMessage {
       }
     });
 
-    this.listenerSetter.add(rootScope, 'peer_pinned_hidden', (e) => {
-      const {peerId, maxId} = e;
-
+    this.listenerSetter.add(rootScope)('peer_pinned_hidden', ({peerId}) => {
       if(peerId === this.topbar.peerId) {
         this.pinnedMessageContainer.toggle(this.hidden = true);
       }
@@ -321,6 +333,7 @@ export default class ChatPinnedMessage {
     // * 200 - no lags
     // * 100 - need test
     this.setPinnedMessage = debounce(() => this._setPinnedMessage(), 100, true, true);
+    this.setCorrectIndexThrottled = throttle(this.setCorrectIndex.bind(this), 100, false);
 
     this.isStatic = this.chat.type === 'discussion';
   }
@@ -334,7 +347,7 @@ export default class ChatPinnedMessage {
 
   public setCorrectIndex(lastScrollDirection?: number) {
     if(this.isStatic) return;
-    //return;
+    // return;
 
     if(this.locked || this.hidden/*  || this.chat.setPeerPromise || this.chat.bubbles.messagesQueuePromise */) {
       return;
@@ -557,7 +570,7 @@ export default class ChatPinnedMessage {
     }
   }
 
-  public _setPinnedMessage() {
+  public async _setPinnedMessage() {
     /////this.log('setting pinned message', message);
     //return;
     /* const promise: Promise<any> = this.chat.setPeerPromise || this.chat.bubbles.messagesQueuePromise || Promise.resolve();
@@ -592,14 +605,18 @@ export default class ChatPinnedMessage {
         const writeMediaTo = this.animatedMedia.getRow(pinnedIndex);
         writeMediaTo.classList.add('pinned-message-media');
         //writeMediaTo.innerHTML = writeMediaTo.style.cssText = writeMediaTo.dataset.docId = '';
+        const loadPromises: Promise<any>[] = [];
         const isMediaSet = wrapReplyDivAndCaption({
           title: undefined,
           titleEl: null,
           subtitle: message.message,
           subtitleEl: writeTo,
           message,
-          mediaEl: writeMediaTo
+          mediaEl: writeMediaTo,
+          loadPromises
         });
+
+        await Promise.all(loadPromises);
 
         this.pinnedMessageContainer.divAndCaption.container.classList.toggle('is-media', isMediaSet);
 

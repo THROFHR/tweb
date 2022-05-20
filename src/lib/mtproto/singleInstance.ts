@@ -1,5 +1,16 @@
+/*
+ * https://github.com/morethanwords/tweb
+ * Copyright (C) 2019-2021 Eduard Kuzmenko
+ * https://github.com/morethanwords/tweb/blob/master/LICENSE
+ * 
+ * Originally from:
+ * https://github.com/zhukov/webogram
+ * Copyright (C) 2014 Igor Zhukov <igor.beatle@gmail.com>
+ * https://github.com/zhukov/webogram/blob/master/LICENSE
+ */
+
 import { MOUNT_CLASS_TO } from "../../config/debug";
-import { nextRandomInt } from "../../helpers/random";
+import { nextRandomUint } from "../../helpers/random";
 import { logger } from "../logger";
 import rootScope from "../rootScope";
 import sessionStorage from "../sessionStorage";
@@ -42,7 +53,7 @@ export class SingleInstance {
   }
 
   public reset() {
-    this.instanceID = nextRandomInt(0xFFFFFFFF);
+    this.instanceID = nextRandomUint(32);
     this.masterInstance = false;
     if(this.deactivateTimeout) clearTimeout(this.deactivateTimeout);
     this.deactivateTimeout = 0;
@@ -56,6 +67,14 @@ export class SingleInstance {
       sessionStorage.delete('xt_instance');
     }
   };
+
+  public activateInstance() {
+    if(this.deactivated) {
+      this.reset();
+      this.checkInstance(false);
+      rootScope.dispatchEvent('instance_activated');
+    }
+  }
 
   public deactivateInstance = () => {
     if(this.masterInstance || this.deactivated) {

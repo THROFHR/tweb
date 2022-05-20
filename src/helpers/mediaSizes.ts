@@ -37,8 +37,13 @@ type MediaTypeSizes = {
   esgSticker: MediaSize,
   animatedSticker: MediaSize,
   staticSticker: MediaSize,
-  emojiSticker: MediaSize
+  emojiSticker: MediaSize,
+  poll: MediaSize,
+  round: MediaSize,
+  documentName: MediaSize
 };
+
+export type MediaSizeType = keyof MediaTypeSizes;
 
 export enum ScreenSize {
   mobile,
@@ -51,7 +56,8 @@ const MEDIUM_SIZE = 1275;
 const LARGE_SIZE = 1680;
 
 class MediaSizes extends EventListenerBase<{
-  changeScreen: (from: ScreenSize, to: ScreenSize) => void
+  changeScreen: (from: ScreenSize, to: ScreenSize) => void,
+  resize: () => void
 }> {
   private screenSizes: {key: ScreenSize, value: number}[] = [
     {key: ScreenSize.mobile, value: MOBILE_SIZE},
@@ -67,23 +73,29 @@ class MediaSizes extends EventListenerBase<{
       esgSticker: makeMediaSize(68, 68),
       animatedSticker: makeMediaSize(180, 180),
       staticSticker: makeMediaSize(180, 180),
-      emojiSticker: makeMediaSize(112, 112)
+      emojiSticker: makeMediaSize(112, 112),
+      poll: makeMediaSize(240, 0),
+      round: makeMediaSize(200, 200),
+      documentName: makeMediaSize(200, 0)
     },
     desktop: {
-      regular: makeMediaSize(400, 320),
-      webpage: makeMediaSize(400, 320),
+      regular: makeMediaSize(420, 340),
+      webpage: makeMediaSize(420, 340),
       album: makeMediaSize(420, 0),
       esgSticker: makeMediaSize(80, 80),
       animatedSticker: makeMediaSize(200, 200),
       staticSticker: makeMediaSize(200, 200),
-      emojiSticker: makeMediaSize(112, 112)
+      emojiSticker: makeMediaSize(112, 112),
+      poll: makeMediaSize(330, 0),
+      round: makeMediaSize(280, 280),
+      documentName: makeMediaSize(240, 0)
     }
   };
 
   public isMobile = false;
   public active: MediaTypeSizes;
   public activeScreen: ScreenSize;
-  public rAF: number;
+  private rAF: number;
 
   constructor() {
     super();
@@ -124,8 +136,12 @@ class MediaSizes extends EventListenerBase<{
       //console.log('changeScreen', this.activeScreen, activeScreen);
 
       if(wasScreen !== undefined) {
-        this.dispatchEvent('changeScreen', this.activeScreen, activeScreen);
+        this.dispatchEvent('changeScreen', wasScreen, activeScreen);
       }
+    }
+
+    if(wasScreen !== undefined) {
+      this.dispatchEvent('resize');
     }
 
     /* if(this.isMobile) {

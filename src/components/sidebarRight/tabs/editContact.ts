@@ -27,11 +27,12 @@ export default class AppEditContactTab extends SliderSuperTab {
   private nameInputField: InputField;
   private lastNameInputField: InputField;
   private editPeer: EditPeer;
-  public peerId: number;
+  public peerId: PeerId;
 
   protected init() {
     this.container.classList.add('edit-peer-container', 'edit-contact-container');
-    this.setTitle('Edit');
+    const isNew = !appUsersManager.isContact(this.peerId.toUserId());
+    this.setTitle(isNew ? 'AddContactTitle' : 'Edit');
 
     {
       const section = new SettingSection({noDelimiter: true});
@@ -41,23 +42,30 @@ export default class AppEditContactTab extends SliderSuperTab {
       inputWrapper.classList.add('input-wrapper');
   
       this.nameInputField = new InputField({
-        label: 'EditProfile.FirstNameLabel',
+        label: 'FirstName',
         name: 'contact-name',
-        maxLength: 70
+        maxLength: 70,
+        required: true
       });
       this.lastNameInputField = new InputField({
-        label: 'Login.Register.LastName.Placeholder',
+        label: 'LastName',
         name: 'contact-lastname',
         maxLength: 70
       });
+
+      if(this.peerId) {
+        const user = appUsersManager.getUser(this.peerId);
+
+        if(isNew) {
+          this.nameInputField.setDraftValue(user.first_name);
+          this.lastNameInputField.setDraftValue(user.last_name);
+        } else {
+          this.nameInputField.setOriginalValue(user.first_name);
+          this.lastNameInputField.setOriginalValue(user.last_name);
+        }
+      }
       
-      const user = appUsersManager.getUser(this.peerId);
-
-      this.nameInputField.setOriginalValue(user.first_name);
-      this.lastNameInputField.setOriginalValue(user.last_name);
-
       inputWrapper.append(this.nameInputField.container, this.lastNameInputField.container);
-      
       inputFields.push(this.nameInputField, this.lastNameInputField);
 
       this.editPeer = new EditPeer({
@@ -68,52 +76,72 @@ export default class AppEditContactTab extends SliderSuperTab {
       });
       this.content.append(this.editPeer.nextBtn);
 
-      const div = document.createElement('div');
-      div.classList.add('avatar-edit');
-      div.append(this.editPeer.avatarElem);
-
-      const notificationsCheckboxField = new CheckboxField({
-        text: 'Notifications'
-      });
-
-      notificationsCheckboxField.input.addEventListener('change', (e) => {
-        if(!e.isTrusted) {
-          return;
-        }
-
-        appMessagesManager.mutePeer(this.peerId);
-      });
-
-      this.listenerSetter.add(rootScope, 'notify_settings', (update) => {
-        if(update.peer._ !== 'notifyPeer') return;
-        const peerId = appPeersManager.getPeerId(update.peer.peer);
-        if(this.peerId === peerId) {
-          const enabled = !appNotificationsManager.isMuted(update.notify_settings);
-          if(enabled !== notificationsCheckboxField.checked) {
-            notificationsCheckboxField.checked = enabled;
+      if(this.peerId) {
+        const div = document.createElement('div');
+        div.classList.add('avatar-edit');
+        div.append(this.editPeer.avatarElem);
+  
+        const notificationsCheckboxField = new CheckboxField({
+          text: 'Notifications'
+        });
+  
+        notificationsCheckboxField.input.addEventListener('change', (e) => {
+          if(!e.isTrusted) {
+            return;
           }
+  
+          appMessagesManager.togglePeerMute(this.peerId);
+        });
+  
+        this.listenerSetter.add(rootScope)('notify_settings', (update) => {
+          if(update.peer._ !== 'notifyPeer') return;
+          const peerId = appPeersManager.getPeerId(update.peer.peer);
+          if(this.peerId === peerId) {
+            const enabled = !appNotificationsManager.isMuted(update.notify_settings);
+            if(enabled !== notificationsCheckboxField.checked) {
+              notificationsCheckboxField.checked = enabled;
+            }
+          }
+        });
+  
+        const profileNameDiv = document.createElement('div');
+        profileNameDiv.classList.add('profile-name');
+        profileNameDiv.append(new PeerTitle({
+          peerId: this.peerId
+        }).element);
+        //profileNameDiv.innerHTML = 'Karen Stanford';
+  
+        const profileSubtitleDiv = document.createElement('div');
+        profileSubtitleDiv.classList.add('profile-subtitle');
+        profileSubtitleDiv.append(i18n('EditContact.OriginalName'));
+
+        section.content.append(div, profileNameDiv, profileSubtitleDiv, inputWrapper);
+
+        if(!isNew) {
+          const notificationsRow = new Row({
+            checkboxField: notificationsCheckboxField
+          });
+    
+          const enabled = !appNotificationsManager.isPeerLocalMuted(this.peerId, false);
+          notificationsCheckboxField.checked = enabled;
+
+          section.content.append(notificationsRow.container);
+        } else {
+          const user = appUsersManager.getUser(this.peerId);
+
+          const phoneRow = new Row({
+            icon: 'phone',
+            titleLangKey: user.phone ? undefined : 'MobileHidden',
+            title: user.phone ? appUsersManager.formatUserPhone(user.phone) : undefined,
+            subtitleLangKey: user.phone ? 'Phone' : 'MobileHiddenExceptionInfo',
+            subtitleLangArgs: user.phone ? undefined : [new PeerTitle({peerId: this.peerId}).element]
+          });
+
+          section.content.append(phoneRow.container);
         }
-      });
-
-      const notificationsRow = new Row({
-        checkboxField: notificationsCheckboxField
-      });
-
-      const enabled = !appNotificationsManager.isPeerLocalMuted(this.peerId, false);
-      notificationsCheckboxField.checked = enabled;
-
-      const profileNameDiv = document.createElement('div');
-      profileNameDiv.classList.add('profile-name');
-      profileNameDiv.append(new PeerTitle({
-        peerId: this.peerId
-      }).element);
-      //profileNameDiv.innerHTML = 'Karen Stanford';
-
-      const profileSubtitleDiv = document.createElement('div');
-      profileSubtitleDiv.classList.add('profile-subtitle');
-      profileSubtitleDiv.append(i18n('EditContact.OriginalName'));
-
-      section.content.append(div, profileNameDiv, profileSubtitleDiv, inputWrapper, notificationsRow.container);
+      } else {
+        section.content.append(inputWrapper);
+      }
 
       this.scrollable.append(section.container);
 
@@ -128,7 +156,7 @@ export default class AppEditContactTab extends SliderSuperTab {
       }, {listenerSetter: this.listenerSetter});
     }
 
-    {
+    if(!isNew) {
       const section = new SettingSection({
         
       });

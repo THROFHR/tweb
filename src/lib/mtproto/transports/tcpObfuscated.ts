@@ -10,6 +10,12 @@ import MTPNetworker from "../networker";
 import Obfuscation from "./obfuscation";
 import MTTransport, { MTConnection, MTConnectionConstructable } from "./transport";
 import intermediatePacketCodec from './intermediate';
+import { ConnectionStatus } from "../connectionStatus";
+
+/// #if MTPROTO_AUTO
+import transportController from "./controller";
+import bytesToHex from "../../../helpers/bytes/bytesToHex";
+/// #endif
 
 export default class TcpObfuscated implements MTTransport {
   private codec = intermediatePacketCodec;
@@ -28,7 +34,10 @@ export default class TcpObfuscated implements MTTransport {
   private log: ReturnType<typeof logger>;
   public connected = false;
   private lastCloseTime: number;
-  private connection: MTConnection;
+  public connection: MTConnection;
+
+  private autoReconnect = true;
+  private reconnectTimeout: number;
 
   //private debugPayloads: MTPNetworker['debugRequests'] = [];
 
@@ -46,16 +55,20 @@ export default class TcpObfuscated implements MTTransport {
     this.connect();
   }
 
-  private onOpen = () => {
+  private onOpen = /* async */() => {
     this.connected = true;
 
-    const initPayload = this.obfuscation.init(this.codec);
+    /// #if MTPROTO_AUTO
+    transportController.setTransportOpened('websocket');
+    /// #endif
+
+    const initPayload = /* await */ this.obfuscation.init(this.codec);
 
     this.connection.send(initPayload);
 
     if(this.networker) {
       this.pending.length = 0; // ! clear queue and reformat messages to container, because if sending simultaneously 10+ messages, connection will die
-      this.networker.setConnectionStatus(true);
+      this.networker.setConnectionStatus(ConnectionStatus.Connected);
       this.networker.cleanupSent();
       this.networker.resend();
     } else {
@@ -100,7 +113,7 @@ export default class TcpObfuscated implements MTTransport {
     //console.log('got hex:', data.hex);
     const pending = this.pending.shift();
     if(!pending) {
-      this.debug && this.log.debug('no pending for res:', data.hex);
+      this.debug && this.log.debug('no pending for res:', bytesToHex(data));
       return;
     }
 
@@ -108,40 +121,129 @@ export default class TcpObfuscated implements MTTransport {
   };
 
   private onClose = () => {
-    this.connected = false;
-
-    this.connection.removeEventListener('open', this.onOpen);
-    this.connection.removeEventListener('close', this.onClose);
-    this.connection.removeEventListener('message', this.onMessage);
-    this.connection = undefined;
+    this.clear();
     
-    const time = Date.now();
-    const diff = time - this.lastCloseTime;
-    const needTimeout = !isNaN(diff) && diff < this.retryTimeout ? this.retryTimeout - diff : 0;
-    
-    if(this.networker) {
-      this.networker.setConnectionStatus(false, needTimeout);
-      this.pending.length = 0;
+    let needTimeout: number, retryAt: number;
+    if(this.autoReconnect) {
+      const time = Date.now();
+      const diff = time - this.lastCloseTime;
+      needTimeout = !isNaN(diff) && diff < this.retryTimeout ? this.retryTimeout - diff : 0;
+      retryAt = time + needTimeout;
     }
     
-    this.log('will try to reconnect after timeout:', needTimeout / 1000);
-    setTimeout(() => {
-      this.log('trying to reconnect...');
-      this.lastCloseTime = Date.now();
-      
-      if(!this.networker) {
-        for(const pending of this.pending) {
-          if(pending.bodySent) {
-            pending.bodySent = false;
-          }
-        }
-      }
-      
-      this.connect();
-    }, needTimeout);
+    if(this.networker) {
+      this.networker.setConnectionStatus(ConnectionStatus.Closed, retryAt);
+      this.pending.length = 0;
+    }
+
+    if(this.autoReconnect) {
+      this.log('will try to reconnect after timeout:', needTimeout / 1000);
+      this.reconnectTimeout = self.setTimeout(this.reconnect, needTimeout);
+    } else {
+      this.log('reconnect isn\'t needed');
+    }
   };
 
+  public clear() {
+    /// #if MTPROTO_AUTO
+    if(this.connected) {
+      transportController.setTransportClosed('websocket');
+    }
+    /// #endif
+
+    this.connected = false;
+
+    if(this.connection) {
+      this.connection.removeEventListener('open', this.onOpen);
+      this.connection.removeEventListener('close', this.onClose);
+      this.connection.removeEventListener('message', this.onMessage);
+      this.connection = undefined;
+    }
+  }
+
+  /**
+   * invoke only when closed
+   */
+  public reconnect = () => {
+    if(this.reconnectTimeout !== undefined) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = undefined;
+    }
+
+    if(this.connection) {
+      return;
+    }
+
+    this.log('trying to reconnect...');
+    this.lastCloseTime = Date.now();
+    
+    if(!this.networker) {
+      for(const pending of this.pending) {
+        if(pending.bodySent) {
+          pending.bodySent = false;
+        }
+      }
+    } else {
+      this.networker.setConnectionStatus(ConnectionStatus.Connecting);
+    }
+
+    this.connect();
+  }
+
+  public forceReconnect() {
+    this.close();
+    this.reconnect();
+  }
+
+  public destroy() {
+    this.setAutoReconnect(false);
+    this.close();
+
+    this.pending.forEach(pending => {
+      if(pending.reject) {
+        pending.reject();
+      }
+    });
+    this.pending.length = 0;
+  }
+
+  public close() {
+    const connection = this.connection;
+    if(connection) {
+      const connected = this.connected;
+      this.clear();
+      if(connected) { // wait for buffered messages if they are there
+        connection.addEventListener('message', this.onMessage);
+        connection.addEventListener('close', () => {
+          connection.removeEventListener('message', this.onMessage);
+        }, {once: true});
+        connection.close();
+      }
+    }
+  }
+
+  /**
+   * Will connect if enable and disconnected \
+   * Will reset reconnection timeout if disable
+   */
+  public setAutoReconnect(enable: boolean) {
+    this.autoReconnect = enable;
+
+    if(!enable) {
+      if(this.reconnectTimeout !== undefined) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = undefined;
+      }
+    } else if(!this.connection && this.reconnectTimeout === undefined) {
+      this.reconnect();
+    }
+  }
+
   private connect() {
+    if(this.connection) {
+      this.close();
+    }
+
     this.connection = new this.Connection(this.dcId, this.url, this.logSuffix);
     this.connection.addEventListener('open', this.onOpen);
     this.connection.addEventListener('close', this.onClose);
@@ -194,10 +296,6 @@ export default class TcpObfuscated implements MTTransport {
     let length = this.pending.length;
     //for(let i = length - 1; i >= 0; --i) {
     for(let i = 0; i < length; ++i) {
-      /* if(this.ws.bufferedAmount) {
-        break;
-      } */
-
       const pending = this.pending[i];
       const {body, bodySent} = pending;
       let encoded = pending.encoded;
@@ -206,25 +304,12 @@ export default class TcpObfuscated implements MTTransport {
         //this.debugPayloads.push({before: body.slice(), after: enc});
 
         this.debug && this.log.debug('-> body length to send:', body.length);
-        /* if(this.ws.bufferedAmount) {
-          this.log.error('bufferedAmount:', this.ws.bufferedAmount);
-        } */
-
-        /* if(this.ws.readyState !== this.ws.OPEN) {
-          this.log.error('ws is closed?');
-          this.connected = false;
-          break;
-        } */
 
         if(!encoded) {
           encoded = pending.encoded = this.encodeBody(body);
         }
 
-        //this.lol.push(body);
-        //setTimeout(() => {
-          this.connection.send(encoded);
-        //}, 100);
-        //this.dd();
+        this.connection.send(encoded);
         
         if(!pending.resolve) { // remove if no response needed
           this.pending.splice(i--, 1);

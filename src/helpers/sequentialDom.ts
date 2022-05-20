@@ -1,5 +1,11 @@
+/*
+ * https://github.com/morethanwords/tweb
+ * Copyright (C) 2019-2021 Eduard Kuzmenko
+ * https://github.com/morethanwords/tweb/blob/master/LICENSE
+ */
+
 import { fastRaf } from "./schedulers";
-import { CancellablePromise, deferredPromise } from "./cancellablePromise";
+import deferredPromise, { CancellablePromise } from "./cancellablePromise";
 import { MOUNT_CLASS_TO } from "../config/debug";
 import isInDOM from "./dom/isInDOM";
 
@@ -39,10 +45,15 @@ class SequentialDom {
    * @param callback 
    */
   public mutateElement(element: HTMLElement, callback?: VoidFunction) {
-    const promise = isInDOM(element) ? this.mutate() : Promise.resolve();
+    const isConnected = isInDOM(element);
+    const promise = isConnected ? this.mutate() : Promise.resolve();
 
     if(callback !== undefined) {
-      promise.then(() => callback());
+      if(isConnected) {
+        callback();
+      } else {
+        promise.then(() => callback());
+      }
     }
 
     return promise;

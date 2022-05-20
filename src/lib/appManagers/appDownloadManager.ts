@@ -10,9 +10,8 @@ import type { MyDocument } from "./appDocsManager";
 import type { MyPhoto } from "./appPhotosManager";
 import rootScope from "../rootScope";
 import apiManager from "../mtproto/mtprotoworker";
-import { deferredPromise, CancellablePromise } from "../../helpers/cancellablePromise";
+import deferredPromise, { CancellablePromise } from "../../helpers/cancellablePromise";
 import { InputFile } from "../../layer";
-import referenceDatabase, {ReferenceBytes} from "../mtproto/referenceDatabase";
 import { getFileNameByLocation } from "../../helpers/fileName";
 import CacheStorageController from "../cacheStorage";
 import { MOUNT_CLASS_TO } from "../../config/debug";
@@ -59,7 +58,7 @@ export class AppDownloadManager {
   };
 
   constructor() {
-    rootScope.on('download_progress', (e) => {
+    rootScope.addEventListener('download_progress', (e) => {
       const details = e as {done: number, fileName: string, total: number, offset: number};
       this.progress[details.fileName] = details;
 
@@ -75,8 +74,8 @@ export class AppDownloadManager {
     });
   }
 
-  private getNewDeferred(fileName: string) {
-    const deferred = deferredPromise<Blob>();
+  private getNewDeferred<T>(fileName: string) {
+    const deferred = deferredPromise<T>();
 
     deferred.cancel = () => {
       //try {
@@ -101,7 +100,7 @@ export class AppDownloadManager {
       this.clearDownload(fileName);
     });
 
-    return this.downloads[fileName] = deferred;
+    return this.downloads[fileName] = deferred as any;
   }
 
   private clearDownload(fileName: string) {
@@ -109,7 +108,7 @@ export class AppDownloadManager {
   }
 
   public fakeDownload(fileName: string, value: Blob | string) {
-    const deferred = this.getNewDeferred(fileName);
+    const deferred = this.getNewDeferred<Blob>(fileName);
     if(typeof(value) === 'string') {
       fetch(value)
       .then(response => response.blob())
@@ -125,28 +124,10 @@ export class AppDownloadManager {
     const fileName = getFileNameByLocation(options.location, {fileName: options.fileName});
     if(this.downloads.hasOwnProperty(fileName)) return this.downloads[fileName];
 
-    const deferred = this.getNewDeferred(fileName);
+    const deferred = this.getNewDeferred<Blob>(fileName);
 
     const onError = (err: ApiError) => {
-      switch(err.type) {
-        case 'FILE_REFERENCE_EXPIRED': {
-          // @ts-ignore
-          const bytes: ReferenceBytes = options?.location?.file_reference;
-          if(bytes) {
-            referenceDatabase.refreshReference(bytes).then(tryDownload);
-            /* referenceDatabase.refreshReference(bytes).then(() => {
-              console.log('FILE_REFERENCE_EXPIRED: refreshed reference', bytes);
-            }); */
-            break;
-          } else {
-            console.warn('FILE_REFERENCE_EXPIRED: no context for bytes:', bytes);
-          }
-        }
-
-        default:
-          deferred.reject(err);
-          break;
-      }
+      deferred.reject(err);
     };
 
     const tryDownload = (): Promise<unknown> => {
@@ -198,7 +179,7 @@ export class AppDownloadManager {
       }
     }
 
-    const deferred = this.getNewDeferred(fileName);
+    const deferred = this.getNewDeferred<InputFile>(fileName);
     apiManager.uploadFile({file, fileName}).then(deferred.resolve, deferred.reject);
 
     deferred.finally(() => {

@@ -9,33 +9,42 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import { bytesToHex } from '../../helpers/bytes';
-import { isObject, longFromInts } from './bin_utils';
-import { MOUNT_CLASS_TO } from '../../config/debug';
-import { str2bigInt, dup, divide_, bigInt2str } from '../../vendor/leemon';
 import Schema, { MTProtoConstructor } from './schema';
+import { JSONValue } from '../../layer';
+import { MOUNT_CLASS_TO } from '../../config/debug';
+import bytesToHex from '../../helpers/bytes/bytesToHex';
+import isObject from '../../helpers/object/isObject';
+import gzipUncompress from '../../helpers/gzipUncompress';
+import bigInt from 'big-integer';
+import longFromInts from '../../helpers/long/longFromInts';
 
-/// #if MTPROTO_WORKER
 // @ts-ignore
-import { gzipUncompress } from '../crypto/crypto_utils';
-/// #endif
+/* import {BigInteger} from 'jsbn';
 
-const boolFalse = +Schema.API.constructors.find(c => c.predicate === 'boolFalse').id >>> 0;
-const boolTrue = +Schema.API.constructors.find(c => c.predicate === 'boolTrue').id >>> 0;
-const vector = +Schema.API.constructors.find(c => c.predicate === 'vector').id >>> 0;
-const gzipPacked = +Schema.MTProto.constructors.find(c => c.predicate === 'gzip_packed').id >>> 0;
+export function bigint(num: number) {
+  return new BigInteger(num.toString(16), 16);
+}
+
+function bigStringInt(strNum: string) {
+  return new BigInteger(strNum, 10)
+} */
+
+const boolFalse = +Schema.API.constructors.find(c => c.predicate === 'boolFalse').id;
+const boolTrue = +Schema.API.constructors.find(c => c.predicate === 'boolTrue').id;
+const vector = +Schema.API.constructors.find(c => c.predicate === 'vector').id;
+const gzipPacked = +Schema.MTProto.constructors.find(c => c.predicate === 'gzip_packed').id;
 
 //console.log('boolFalse', boolFalse === 0xbc799737);
 
 class TLSerialization {
-  public maxLength = 2048; // 2Kb
-  public offset = 0; // in bytes
-  public mtproto = false;
+  private maxLength = 2048; // 2Kb
+  private offset = 0; // in bytes
+  private mtproto = false;
   private debug = false;//Modes.debug;
 
-  public buffer: ArrayBuffer;
-  public intView: Int32Array;
-  public byteView: Uint8Array;
+  private buffer: ArrayBuffer;
+  private intView: Int32Array;
+  private byteView: Uint8Array;
 
   constructor(options: Partial<{startMaxLength: number, mtproto: true}> = {}) {
     this.maxLength = options.startMaxLength || 2048; // 2Kb
@@ -75,7 +84,7 @@ class TLSerialization {
 
   public getBytes(typed: true): Uint8Array;
   public getBytes(typed?: false): number[];
-  public getBytes(typed?: boolean): number[] | Uint8Array {
+  public getBytes(typed: boolean = true): number[] | Uint8Array {
     if(typed) {
       const resultBuffer = new ArrayBuffer(this.offset);
       const resultArray = new Uint8Array(resultBuffer);
@@ -85,11 +94,15 @@ class TLSerialization {
       return resultArray;
     }
   
-    const bytes: number[] = [];
+    const bytes: number[] = new Array(this.offset);
     for(let i = 0; i < this.offset; i++) {
-      bytes.push(this.byteView[i]);
+      bytes[i] = this.byteView[i];
     }
     return bytes;
+  }
+
+  public getOffset() {
+    return this.offset;
   }
 
   public checkLength(needBytes: number) {
@@ -151,26 +164,10 @@ class TLSerialization {
       sLong = sLong ? sLong.toString() : '0';
     }
 
-    const R = 0x100000000;
-    //const divRem = bigStringInt(sLong).divideAndRemainder(bigint(R));
+    const {quotient, remainder} = bigInt(sLong).divmod(0x100000000);
+    const high = quotient.toJSNumber();
+    const low = remainder.toJSNumber();
 
-    const a = str2bigInt(sLong, 10, 64);
-    const q = dup(a);
-    const r = dup(a);
-    divide_(a, str2bigInt((R).toString(16), 16, 64), q, r);
-    //divInt_(a, R);
-
-    const high = +bigInt2str(q, 10);
-    let low = +bigInt2str(r, 10);
-
-    if(high < low) {
-      low -= R; 
-    }
-
-    //console.log('storeLong', sLong, divRem[0].intValue(), divRem[1].intValue(), high, low);
-  
-    //this.writeInt(divRem[1].intValue(), (field || '') + ':long[low]');
-    //this.writeInt(divRem[0].intValue(), (field || '') + ':long[high]');
     this.writeInt(low, (field || '') + ':long[low]');
     this.writeInt(high, (field || '') + ':long[high]');
   }
@@ -221,10 +218,11 @@ class TLSerialization {
     } else if(bytes === undefined) {
       bytes = [];
     }
+
     this.debug && console.log('>>>', bytesToHex(bytes as number[]), (field || '') + ':bytes');
   
-    // if uint8array were json.stringified, then will be: {'0': 123, '1': 123}
-    const len = (bytes as ArrayBuffer).byteLength || (bytes as Uint8Array).length;
+    // if uint8array was json.stringified, then will be: {'0': 123, '1': 123}
+    const len = (bytes as Uint8Array).length;
     this.checkLength(len + 8);
     if(len <= 253) {
       this.byteView[this.offset++] = len;
@@ -244,22 +242,22 @@ class TLSerialization {
     }
   }
   
-  public storeIntBytes(bytes: any, bits: any, field?: string) {
+  public storeIntBytes(bytes: ArrayBuffer | Uint8Array | number[], bits: number, field?: string) {
     if(bytes instanceof ArrayBuffer) {
       bytes = new Uint8Array(bytes);
     }
 
-    const len = bytes.length;
+    const len = (bytes as Uint8Array).length;
     if((bits % 32) || (len * 8) !== bits) {
-      const error = new Error('Invalid bits: ' + bits + ', ' + bytes.length);
+      const error = new Error('Invalid bits: ' + bits + ', ' + len);
       console.error(error, bytes, field);
       throw error;
     }
   
-    this.debug && console.log('>>>', bytesToHex(bytes), (field || '') + ':int' + bits);
+    this.debug && console.log('>>>', bytesToHex(bytes as Uint8Array), (field || '') + ':int' + bits);
     this.checkLength(len);
   
-    this.byteView.set(bytes, this.offset);
+    this.byteView.set(bytes as Uint8Array, this.offset);
     this.offset += len;
   }
   
@@ -438,54 +436,55 @@ class TLSerialization {
   }
 }
 
-class TLDeserialization {
-  public offset = 0; // in bytes
-  public override: {[key: string]: (result: any, field: string) => void};
+class TLDeserialization<FetchLongAs extends Long> {
+  private offset = 0; // in bytes
+  private override: {[key: string]: (result: any, field: string) => void};
 
-  public buffer: ArrayBuffer;
-  //public intView: Uint32Array;
-  public byteView: Uint8Array;
+  private buffer: ArrayBuffer;
+  private intView: Int32Array;
+  private byteView: Uint8Array;
 
   // this.debug = 
-  public mtproto: boolean = false;
+  private mtproto: boolean = false;
   private debug: boolean;
 
   constructor(buffer: ArrayBuffer | Uint8Array, options: Partial<{override: any, mtproto: true, debug: true}> = {}) {
     //buffer = addPadding(buffer, 4, true); // fix 21.01.2020 for wss
     if(buffer instanceof ArrayBuffer) {
       this.buffer = buffer;
+      this.intView = new Int32Array(buffer);
       this.byteView = new Uint8Array(this.buffer);
     } else {
       this.buffer = buffer.buffer;
+      this.intView = new Int32Array(buffer.buffer);
       this.byteView = buffer;
     }
-    
-    //console.log("TCL: TLDeserialization -> constructor -> buffer", buffer, this.byteView, this.byteView.hex);
-    /* this.buffer = buffer;
-    //this.intView = new Uint32Array(this.buffer);
-    this.byteView = new Uint8Array(this.buffer); */
 
     //console.log(this.intView);
 
-    this.override = 'override' in options ? options.override : {};
-    this.mtproto = 'mtproto' in options ? options.mtproto : false;
+    this.override = options.override || {};
+    this.mtproto = !!options.mtproto;
     this.debug = options.debug !== undefined ? options.debug : /* Modes.debug */false;
   }
 
-  public readInt(field: string) {
+  /* public setMtproto(mtproto: boolean) {
+    this.mtproto = mtproto;
+  } */
+
+  private readInt(field: string) {
     //if(this.offset >= this.intView.length * 4) {
     if((this.byteView.length - this.offset) < 4) {
       console.error(this.byteView, this.offset);
       throw new Error('Nothing to fetch: ' + field);
     }
   
-    //var i = this.intView[this.offset / 4];
-    const i = new Uint32Array(this.byteView.buffer.slice(this.offset, this.offset + 4))[0];
+    const i = this.intView[this.offset / 4];
+    // const i = new Uint32Array(this.byteView.buffer.slice(this.offset, this.offset + 4))[0];
   
     this.debug/*  || field.includes('[dialog][read_outbox_max_id]') */ 
       && console.log('<<<', i.toString(16), i, field, 
       this.byteView.slice(this.offset - 16, this.offset + 16), 
-      this.byteView.slice(this.offset - 16, this.offset + 16).hex);
+      bytesToHex(this.byteView.slice(this.offset - 16, this.offset + 16)));
   
     this.offset += 4;
   
@@ -507,13 +506,22 @@ class TLDeserialization {
     return doubleView[0];
   }
   
-  public fetchLong(field?: string): string {
+  public fetchLong(field?: string): FetchLongAs {
     const iLow = this.readInt((field || '') + ':long[low]');
     const iHigh = this.readInt((field || '') + ':long[high]');
   
     //const longDec = bigint(iHigh).shiftLeft(32).add(bigint(iLow)).toString();
     const longDec = longFromInts(iHigh, iLow);
+
+    if(!this.mtproto) {
+      const num = +longDec;
+      if(Number.isSafeInteger(num)) {
+        // @ts-ignore
+        return num;
+      }
+    }
   
+    // @ts-ignore
     return longDec;
   }
   
@@ -560,7 +568,7 @@ class TLDeserialization {
     return s;
   }
   
-  public fetchBytes(field?: string): Uint8Array {
+  public fetchBytes(field?: string) {
     let len = this.byteView[this.offset++];
   
     if(len === 254) {
@@ -584,7 +592,7 @@ class TLDeserialization {
   
   public fetchIntBytes(bits: number, typed: true, field?: string): Uint8Array;
   public fetchIntBytes(bits: number, typed?: false, field?: string): number[];
-  public fetchIntBytes(bits: number, typed?: boolean, field?: string) {
+  public fetchIntBytes(bits: number, typed: boolean = true, field?: string) {
     if(bits % 32) {
       throw new Error('Invalid bits: ' + bits);
     }
@@ -596,9 +604,9 @@ class TLDeserialization {
       return result;
     }
   
-    const bytes: number[] = [];
+    const bytes: number[] = new Array(len);
     for(let i = 0; i < len; i++) {
-      bytes.push(this.byteView[this.offset++]);
+      bytes[i] = this.byteView[this.offset++];
     }
   
     this.debug && console.log('<<<', bytesToHex(bytes), (field || '') + ':int' + bits);
@@ -606,9 +614,9 @@ class TLDeserialization {
     return bytes;
   }
   
-  public fetchRawBytes(len: any, typed: true, field: string): Uint8Array;
-  public fetchRawBytes(len: any, typed: false, field: string): number[];
-  public fetchRawBytes(len: any, typed: boolean, field: string) {
+  public fetchRawBytes(len: number | false, typed: true, field: string): Uint8Array;
+  public fetchRawBytes(len: number | false, typed: false, field: string): number[];
+  public fetchRawBytes(len: number | false, typed: boolean = true, field: string) {
     if(len === false) {
       len = this.readInt((field || '') + '_length');
       if(len > this.byteView.byteLength) {
@@ -623,17 +631,30 @@ class TLDeserialization {
       return bytes;
     }
   
-    const bytes: number[] = [];
+    const bytes: number[] = new Array(len);
     for(let i = 0; i < len; i++) {
-      bytes.push(this.byteView[this.offset++]);
+      bytes[i] = this.byteView[this.offset++];
     }
   
     this.debug && console.log('<<<', bytesToHex(bytes), (field || ''));
   
     return bytes;
   }
+
+  private fetchVector(type: string, field?: string) {
+    const len = this.readInt(field + '[count]');
+    const result: any[] = new Array(len);
+    if(len > 0) {
+      const itemType = type.substr(7, type.length - 8); // for "Vector<itemType>"
+      for(let i = 0; i < len; ++i) {
+        result[i] = this.fetchObject(itemType, field + '[' + i + ']');
+      }
+    }
   
-  public fetchObject(type: any, field?: string): any {
+    return result;
+  }
+  
+  public fetchObject(type: string, field?: string): any {
     switch(type) {
       case '#':
       case 'int':
@@ -641,11 +662,11 @@ class TLDeserialization {
       case 'long':
         return this.fetchLong(field);
       case 'int128':
-        return this.fetchIntBytes(128, false, field);
+        return this.fetchIntBytes(128, true, field);
       case 'int256':
-        return this.fetchIntBytes(256, false, field);
+        return this.fetchIntBytes(256, true, field);
       case 'int512':
-        return this.fetchIntBytes(512, false, field);
+        return this.fetchIntBytes(512, true, field);
       case 'string':
         return this.fetchString(field);
       case 'bytes':
@@ -660,34 +681,8 @@ class TLDeserialization {
   
     field = field || type || 'Object';
   
-    if(type.substr(0, 6) === 'Vector' || type.substr(0, 6) === 'vector') {
-      if(type.charAt(0) === 'V') {
-        const constructor = this.readInt(field + '[id]');
-        const constructorCmp = constructor;
-  
-        if(constructorCmp === gzipPacked) { // Gzip packed
-          const compressed = this.fetchBytes(field + '[packed_string]');
-          const uncompressed = gzipUncompress(compressed);
-          const newDeserializer = new TLDeserialization(uncompressed);
-  
-          return newDeserializer.fetchObject(type, field);
-        }
-
-        if(constructorCmp !== vector) {
-          throw new Error('Invalid vector constructor ' + constructor);
-        }
-      }
-
-      const len = this.readInt(field + '[count]');
-      const result: any = [];
-      if(len > 0) {
-        const itemType = type.substr(7, type.length - 8); // for "Vector<itemType>"
-        for(let i = 0; i < len; i++) {
-          result.push(this.fetchObject(itemType, field + '[' + i + ']'));
-        }
-      }
-  
-      return result;
+    if(type.charAt(0) === 'v' && type.substr(1, 5) === 'ector') {
+      return this.fetchVector(type, field);
     }
   
     const schema = this.mtproto ? Schema.MTProto : Schema.API;
@@ -700,21 +695,24 @@ class TLDeserialization {
       if(!constructorData) {
         throw new Error('Constructor not found for type: ' + type);
       }
-    } else if(type.charAt(0) >= 97 && type.charAt(0) <= 122) {
+    }/*  else if(type.charAt(0) >= 97 && type.charAt(0) <= 122) {
       constructorData = schema.constructors.find(c => c.predicate === type);
       if(!constructorData) {
         throw new Error('Constructor not found for predicate: ' + type);
       }
-    } else {
-      const constructor = this.readInt(field + '[id]');
-      const constructorCmp = constructor;
+    } */ else {
+      const constructorCmp = this.readInt(field + '[id]');
   
       if(constructorCmp === gzipPacked) { // Gzip packed
         const compressed = this.fetchBytes(field + '[packed_string]');
-        const uncompressed = gzipUncompress(compressed);
-        const newDeserializer = new TLDeserialization(uncompressed);
+        const uncompressed = gzipUncompress(compressed) as Uint8Array;
+        const newDeserializer = new TLDeserialization(uncompressed); // rpc_result is packed here
   
         return newDeserializer.fetchObject(type, field);
+      }
+
+      if(constructorCmp === vector) {
+        return this.fetchVector(type, field);
       }
   
       let index = schema.constructorsIndex;
@@ -726,7 +724,7 @@ class TLDeserialization {
       }
 
       const i = index[constructorCmp];
-      if(i) {
+      if(i !== undefined) {
         constructorData = schema.constructors[i];
       }
   
@@ -744,7 +742,7 @@ class TLDeserialization {
       }
 
       if(!constructorData) {
-        console.error('Constructor not found:', constructor);
+        console.error('Constructor not found:', constructorCmp);
         
         let int1: number, int2: number;
         try {
@@ -754,7 +752,7 @@ class TLDeserialization {
 
         }
 
-        throw new Error('Constructor not found: ' + constructor + ' ' + int1 + ' ' + int2 + ' ' + field);
+        throw new Error('Constructor not found: ' + constructorCmp + ' ' + int1 + ' ' + int2 + ' ' + field);
       }
     }
   
@@ -805,21 +803,48 @@ class TLDeserialization {
     if(fallback) {
       this.mtproto = true;
     }
+
+    if(type === 'JSONValue') {
+      return this.formatJSONValue(result);
+    }
   
     return result;
+  }
+
+  private formatJSONValue(jsonValue: JSONValue): any {
+    if(!jsonValue._) return jsonValue;
+    switch(jsonValue._) {
+      case 'jsonNull':
+        return null;
+      case 'jsonObject': {
+        const out: any = {};
+        const objectValues = jsonValue.value;
+        for(let i = 0, length = objectValues.length; i < length; ++i) {
+          const objectValue = objectValues[i];
+          out[objectValue.key] = this.formatJSONValue(objectValue.value);
+        }
+        return out;
+      }
+      default:
+        return jsonValue.value;
+    }
   }
   
   public getOffset() {
     return this.offset;
   }
+
+  public setOffset(offset: number) {
+    this.offset = offset;
+  }
   
-  public fetchEnd() {
+  /* public fetchEnd() {
     if(this.offset !== this.byteView.length) {
       throw new Error('Fetch end with non-empty buffer');
     }
 
     return true;
-  }
+  } */
 }
 
 MOUNT_CLASS_TO.TLDeserialization = TLDeserialization;

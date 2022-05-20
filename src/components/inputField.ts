@@ -4,38 +4,78 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
+import simulateEvent from "../helpers/dom/dispatchEvent";
+import documentFragmentToHTML from "../helpers/dom/documentFragmentToHTML";
+import findUpAttribute from "../helpers/dom/findUpAttribute";
 import getRichValue from "../helpers/dom/getRichValue";
 import isInputEmpty from "../helpers/dom/isInputEmpty";
-import { debounce } from "../helpers/schedulers";
+import selectElementContents from "../helpers/dom/selectElementContents";
+import setInnerHTML from "../helpers/dom/setInnerHTML";
+import { MessageEntity } from "../layer";
 import { i18n, LangPackKey, _i18n } from "../lib/langPack";
 import RichTextProcessor from "../lib/richtextprocessor";
+import SetTransition from "./singleTransition";
 
 let init = () => {
   document.addEventListener('paste', (e) => {
-    if(!(e.target as HTMLElement).hasAttribute('contenteditable') && !(e.target as HTMLElement).parentElement.hasAttribute('contenteditable')) {
+    if(!findUpAttribute(e.target, 'contenteditable="true"')) {
       return;
     }
-    //console.log('document paste');
-
-    //console.log('messageInput paste');
 
     e.preventDefault();
-    // @ts-ignore
-    let text = (e.originalEvent || e).clipboardData.getData('text/plain');
-
-    let entities = RichTextProcessor.parseEntities(text);
-    //console.log('messageInput paste', text, entities);
-    entities = entities.filter(e => e._ === 'messageEntityEmoji' || e._ === 'messageEntityLinebreak');
-    //text = RichTextProcessor.wrapEmojiText(text);
-    text = RichTextProcessor.wrapRichText(text, {entities, noLinks: true, wrappingDraft: true});
-
-    // console.log('messageInput paste after', text);
+    let text: string, entities: MessageEntity[];
 
     // @ts-ignore
-    //let html = (e.originalEvent || e).clipboardData.getData('text/html');
+    let plainText: string = (e.originalEvent || e).clipboardData.getData('text/plain');
+    let usePlainText = true;
 
     // @ts-ignore
-    //console.log('paste text', text, );
+    let html: string = (e.originalEvent || e).clipboardData.getData('text/html');
+    if(html.trim()) {
+      html = html.replace(/<style([\s\S]*)<\/style>/, '');
+      html = html.replace(/<!--([\s\S]*)-->/, '');
+
+      const match = html.match(/<body>([\s\S]*)<\/body>/);
+      if(match) {
+        html = match[1].trim();
+      }
+
+      let span: HTMLElement = document.createElement('span');
+      span.innerHTML = html;
+
+      let curChild = span.firstChild;
+      while(curChild) { // * fix whitespace between elements like <p>asd</p>\n<p>zxc</p>
+        let nextSibling = curChild.nextSibling;
+        if(curChild.nodeType === 3) {
+          if(!curChild.nodeValue.trim()) {
+            curChild.remove();
+          }
+        }
+
+        curChild = nextSibling;
+      }
+
+      const richValue = getRichValue(span, true);
+      if(richValue.value.replace(/\s/g, '').length === plainText.replace(/\s/g, '').length) {
+        text = richValue.value;
+        entities = richValue.entities;
+        usePlainText = false;
+  
+        let entities2 = RichTextProcessor.parseEntities(text);
+        entities2 = entities2.filter(e => e._ === 'messageEntityEmoji' || e._ === 'messageEntityLinebreak');
+        RichTextProcessor.mergeEntities(entities, entities2);
+      }
+    }
+    
+    if(usePlainText) {
+      text = plainText;
+      entities = RichTextProcessor.parseEntities(text);
+      entities = entities.filter(e => e._ === 'messageEntityEmoji' || e._ === 'messageEntityLinebreak');
+    }
+
+    const fragment = RichTextProcessor.wrapDraftText(text, {entities});
+    text = documentFragmentToHTML(fragment);
+    
     window.document.execCommand('insertHTML', false, text);
   });
 
@@ -69,12 +109,15 @@ export type InputFieldOptions = {
   placeholder?: LangPackKey, 
   label?: LangPackKey, 
   labelOptions?: any[],
-  labelText?: string,
+  labelText?: string | DocumentFragment,
   name?: string, 
   maxLength?: number, 
   showLengthOn?: number,
   plainText?: true,
-  animate?: true
+  animate?: boolean,
+  required?: boolean,
+  canBeEdited?: boolean,
+  validate?: () => boolean
 };
 
 class InputField {
@@ -85,19 +128,25 @@ class InputField {
 
   public originalValue: string;
 
+  public required: boolean;
+  public validate: () => boolean;
+
   //public onLengthChange: (length: number, isOverflow: boolean) => void;
-  protected wasInputFakeClientHeight: number;
-  protected showScrollDebounced: () => void;
+  // protected wasInputFakeClientHeight: number;
+  // protected showScrollDebounced: () => void;
 
   constructor(public options: InputFieldOptions = {}) {
     this.container = document.createElement('div');
     this.container.classList.add('input-field');
 
-    if(options.maxLength) {
-      options.showLengthOn = Math.round(options.maxLength / 3);
+    this.required = options.required;
+    this.validate = options.validate;
+
+    if(options.maxLength !== undefined && options.showLengthOn === undefined) {
+      options.showLengthOn = Math.min(40, Math.round(options.maxLength / 3));
     }
 
-    const {placeholder, maxLength, showLengthOn, name, plainText} = options;
+    const {placeholder, maxLength, showLengthOn, name, plainText, canBeEdited = true} = options;
 
     let label = options.label || options.labelText;
 
@@ -108,7 +157,7 @@ class InputField {
       }
 
       this.container.innerHTML = `
-      <div contenteditable="true" class="input-field-input"></div>
+      <div contenteditable="${String(!!canBeEdited)}" class="input-field-input"></div>
       `;
 
       input = this.container.firstElementChild as HTMLElement;
@@ -137,8 +186,8 @@ class InputField {
 
       if(options.animate) {
         input.classList.add('scrollable', 'scrollable-y');
-        this.wasInputFakeClientHeight = 0;
-        this.showScrollDebounced = debounce(() => this.input.classList.remove('no-scrollbar'), 150, false, true);
+        // this.wasInputFakeClientHeight = 0;
+        // this.showScrollDebounced = debounce(() => this.input.classList.remove('no-scrollbar'), 150, false, true);
         this.inputFake = document.createElement('div');
         this.inputFake.setAttribute('contenteditable', 'true');
         this.inputFake.className = input.className + ' input-field-input-fake';
@@ -206,29 +255,54 @@ class InputField {
   }
 
   public select() {
-    if((this.input as HTMLInputElement).value) { // * avoid selecting whole empty field on iOS devices
+    if(!this.value) { // * avoid selecting whole empty field on iOS devices
+      return;
+    }
+
+    if(this.options.plainText) {
       (this.input as HTMLInputElement).select(); // * select text
+    } else {
+      selectElementContents(this.input);
     }
   }
 
   public setLabel() {
     this.label.textContent = '';
     if(this.options.labelText) {
-      this.label.innerHTML = this.options.labelText;
+      setInnerHTML(this.label, this.options.labelText);
     } else {
       this.label.append(i18n(this.options.label, this.options.labelOptions));
     }
   }
 
-  public onFakeInput() {
-    const {scrollHeight, clientHeight} = this.inputFake;
-    if(this.wasInputFakeClientHeight && this.wasInputFakeClientHeight !== clientHeight) {
+  public onFakeInput(setHeight = true) {
+    const {scrollHeight: newHeight/* , clientHeight */} = this.inputFake;
+    /* if(this.wasInputFakeClientHeight && this.wasInputFakeClientHeight !== clientHeight) {
       this.input.classList.add('no-scrollbar'); // ! в сафари может вообще не появиться скролл после анимации, так как ему нужен полный reflow блока с overflow.
       this.showScrollDebounced();
+    } */
+
+    const currentHeight = +this.input.style.height.replace('px', '');
+    if(currentHeight === newHeight) {
+      return;
     }
 
-    this.wasInputFakeClientHeight = clientHeight;
-    this.input.style.height = scrollHeight ? scrollHeight + 'px' : '';
+    const TRANSITION_DURATION_FACTOR = 50;
+    const transitionDuration = Math.round(
+      TRANSITION_DURATION_FACTOR * Math.log(Math.abs(newHeight - currentHeight)),
+    );
+
+    // this.wasInputFakeClientHeight = clientHeight;
+    this.input.style.transitionDuration = `${transitionDuration}ms`;
+
+    if(setHeight) {
+      this.input.style.height = newHeight ? newHeight + 'px' : '';
+    }
+
+    const className = 'is-changing-height';
+    SetTransition(this.input, className, true, transitionDuration, () => {
+      this.input.classList.remove(className);
+    });
   }
 
   get value() {
@@ -239,8 +313,7 @@ class InputField {
   set value(value: string) {
     this.setValueSilently(value, false);
 
-    const event = new Event('input', {bubbles: true, cancelable: true});
-    this.input.dispatchEvent(event);
+    simulateEvent(this.input, 'input');
   }
 
   public setValueSilently(value: string, fireFakeInput = true) {
@@ -259,15 +332,23 @@ class InputField {
     }
   }
 
-  public isValid() {
-    return !this.input.classList.contains('error') && this.value !== this.originalValue;
+  public isChanged() {
+    return this.value !== this.originalValue;
   }
 
-  public setOriginalValue(value: InputField['originalValue'] = '', silent = false) {
-    this.originalValue = value;
+  public isValid() {
+    return !this.input.classList.contains('error') && 
+      (!this.validate || this.validate()) && 
+      (!this.required || !isInputEmpty(this.input));
+  }
 
+  public isValidToChange() {
+    return this.isValid() && this.isChanged();
+  }
+
+  public setDraftValue(value = '', silent = false) {
     if(!this.options.plainText) {
-      value = RichTextProcessor.wrapDraftText(value);
+      value = documentFragmentToHTML(RichTextProcessor.wrapDraftText(value));
     }
 
     if(silent) {
@@ -275,6 +356,11 @@ class InputField {
     } else {
       this.value = value;
     }
+  }
+
+  public setOriginalValue(value: InputField['originalValue'] = '', silent = false) {
+    this.originalValue = value;
+    this.setDraftValue(value, silent);
   }
 
   public setState(state: InputState, label?: LangPackKey) {

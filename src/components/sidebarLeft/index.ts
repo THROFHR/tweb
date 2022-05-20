@@ -4,7 +4,6 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { formatNumber } from "../../helpers/number";
 import appImManager from "../../lib/appManagers/appImManager";
 import appStateManager from "../../lib/appManagers/appStateManager";
 import appUsersManager from "../../lib/appManagers/appUsersManager";
@@ -25,22 +24,36 @@ import AppNewChannelTab from "./tabs/newChannel";
 import AppContactsTab from "./tabs/contacts";
 import AppArchivedTab from "./tabs/archivedTab";
 import AppAddMembersTab from "./tabs/addMembers";
-import { i18n_, LangPackKey } from "../../lib/langPack";
+import I18n, { FormatterArguments, i18n, i18n_, LangPackKey } from "../../lib/langPack";
+import AppPeopleNearbyTab from "./tabs/peopleNearby";
 import { ButtonMenuItemOptions } from "../buttonMenu";
 import CheckboxField from "../checkboxField";
-import { isMobileSafari } from "../../helpers/userAgent";
-import appNavigationController from "../appNavigationController";
+import { IS_MOBILE_SAFARI } from "../../environment/userAgent";
+import appNavigationController, { NavigationItem } from "../appNavigationController";
 import findUpClassName from "../../helpers/dom/findUpClassName";
 import findUpTag from "../../helpers/dom/findUpTag";
 import PeerTitle from "../peerTitle";
 import App from "../../config/app";
 import ButtonMenuToggle from "../buttonMenuToggle";
 import replaceContent from "../../helpers/dom/replaceContent";
+import sessionStorage from "../../lib/sessionStorage";
+import { attachClickEvent, CLICK_EVENT_NAME } from "../../helpers/dom/clickEvent";
+import { closeBtnMenu } from "../misc";
+import ButtonIcon from "../buttonIcon";
+import confirmationPopup from "../confirmationPopup";
+import IS_GEOLOCATION_SUPPORTED from "../../environment/geolocationSupport";
+import type SortedUserList from "../sortedUserList";
+import Button, { ButtonOptions } from "../button";
+import noop from "../../helpers/noop";
+import ripple from "../ripple";
+import indexOfAndSplice from "../../helpers/array/indexOfAndSplice";
+import formatNumber from "../../helpers/number/formatNumber";
+import AvatarElement from "../avatar";
 
 export const LEFT_COLUMN_ACTIVE_CLASSNAME = 'is-left-column-shown';
 
 export class AppSidebarLeft extends SidebarSlider {
-  private toolsBtn: HTMLButtonElement;
+  private toolsBtn: HTMLElement;
   private backBtn: HTMLButtonElement;
   //private searchInput = document.getElementById('global-search') as HTMLInputElement;
   private inputSearch: InputSearch;
@@ -52,7 +65,10 @@ export class AppSidebarLeft extends SidebarSlider {
   //private log = logger('SL');
 
   private searchGroups: {[k in 'contacts' | 'globalContacts' | 'messages' | 'people' | 'recent']: SearchGroup} = {} as any;
-  searchSuper: AppSearchSuper;
+  private searchSuper: AppSearchSuper;
+
+  private updateBtn: HTMLElement;
+  private hasUpdate: boolean;
 
   constructor() {
     super({
@@ -68,7 +84,6 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const onNewGroupClick = () => {
       new AppAddMembersTab(this).open({
-        peerId: 0,
         type: 'chat',
         skippable: false,
         takeOut: (peerIds) => {
@@ -93,8 +108,8 @@ export class AppSidebarLeft extends SidebarSlider {
         new AppArchivedTab(this).open();
       },
       verify: () => {
-        const folder = appMessagesManager.dialogsStorage.getFolder(1);
-        return !!folder.length;
+        const folder = appMessagesManager.dialogsStorage.getFolderDialogs(1, false);
+        return !!folder.length || !appMessagesManager.dialogsStorage.isDialogsLoaded(1);
       }
     };
 
@@ -105,10 +120,10 @@ export class AppSidebarLeft extends SidebarSlider {
     themeCheckboxField.input.addEventListener('change', () => {
       rootScope.settings.theme = themeCheckboxField.input.checked ? 'night' : 'day';
       appStateManager.pushToState('settings', rootScope.settings);
-      appImManager.applyCurrentTheme();
+      rootScope.dispatchEvent('theme_change');
     });
 
-    rootScope.on('theme_change', () => {
+    rootScope.addEventListener('theme_change', () => {
       themeCheckboxField.setValueSilently(rootScope.getTheme().name === 'night');
     });
 
@@ -117,14 +132,22 @@ export class AppSidebarLeft extends SidebarSlider {
       text: 'SavedMessages',
       onClick: () => {
         setTimeout(() => { // menu doesn't close if no timeout (lol)
-          appImManager.setPeer(appImManager.myId);
+          appImManager.setPeer({
+            peerId: appImManager.myId
+          });
         }, 0);
       }
     }, btnArchive, {
       icon: 'user',
       text: 'Contacts',
       onClick: onContactsClick
-    }, {
+    }, IS_GEOLOCATION_SUPPORTED ? {
+      icon: 'group',
+      text: 'PeopleNearby',
+      onClick: () => {
+        new AppPeopleNearbyTab(this).open();
+      }
+    } : undefined, {
       icon: 'settings',
       text: 'Settings',
       onClick: () => {
@@ -152,7 +175,8 @@ export class AppSidebarLeft extends SidebarSlider {
       icon: 'help',
       text: 'TelegramFeatures',
       onClick: () => {
-        appImManager.openUsername('TelegramTips');
+        const url = I18n.format('TelegramFeaturesUrl', true);
+        appImManager.openUrl(url);
       }
     }, {
       icon: 'bug',
@@ -167,10 +191,33 @@ export class AppSidebarLeft extends SidebarSlider {
           a.remove();
         }, 0);
       }
+    }, {
+      icon: 'char z',
+      text: 'ChatList.Menu.SwitchTo.Z',
+      onClick: () => {
+        Promise.all([
+          sessionStorage.set({kz_version: 'Z'}),
+          sessionStorage.delete('tgme_sync')
+        ]).then(() => {
+          location.href = 'https://web.telegram.org/z/';
+        });
+      },
+      verify: () => App.isMainDomain
+    }, {
+      icon: 'char w',
+      text: 'ChatList.Menu.SwitchTo.Webogram',
+      onClick: () => {
+        sessionStorage.delete('tgme_sync').then(() => {
+          location.href = 'https://web.telegram.org/?legacy=1';
+        });
+      },
+      verify: () => App.isMainDomain
     }];
 
-    this.toolsBtn = ButtonMenuToggle({}, 'bottom-right', menuButtons, (e) => {
-      menuButtons.forEach(button => {
+    const filteredButtons = menuButtons.filter(Boolean);
+
+    this.toolsBtn = ButtonMenuToggle({}, 'bottom-right', filteredButtons, (e) => {
+      filteredButtons.forEach(button => {
         if(button.verify) {
           button.element.classList.toggle('hide', !button.verify());
         }
@@ -183,11 +230,18 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const btnMenu = this.toolsBtn.querySelector('.btn-menu') as HTMLElement;
 
-    const btnMenuFooter = document.createElement('div');
+    const btnMenuFooter = document.createElement('a');
+    btnMenuFooter.href = 'https://github.com/morethanwords/tweb/blob/master/CHANGELOG.md';
+    btnMenuFooter.target = '_blank';
+    btnMenuFooter.rel = 'noopener noreferrer';
     btnMenuFooter.classList.add('btn-menu-footer');
+    btnMenuFooter.addEventListener(CLICK_EVENT_NAME, (e) => {
+      e.stopPropagation();
+      closeBtnMenu();
+    });
     const t = document.createElement('span');
     t.classList.add('btn-menu-footer-text');
-    t.innerHTML = 'Telegram WebK alpha ' + App.version;
+    t.innerHTML = 'Telegram Web' + App.suffix + ' '/* ' alpha ' */ + App.versionFull;
     btnMenuFooter.append(t); 
     btnMenu.classList.add('has-footer');
     btnMenu.append(btnMenuFooter);
@@ -215,6 +269,28 @@ export class AppSidebarLeft extends SidebarSlider {
     this.newBtnMenu.id = 'new-menu';
     sidebarHeader.nextElementSibling.append(this.newBtnMenu);
 
+    this.updateBtn = document.createElement('div');
+    // this.updateBtn.classList.add('btn-update');
+    this.updateBtn.className = 'btn-circle rp btn-corner z-depth-1 btn-update is-hidden';
+    ripple(this.updateBtn);
+    this.updateBtn.append(i18n('Update'));
+    // const weave = new TopbarWeave();
+    // const weaveContainer = weave.render('btn-update-weave');
+    // this.updateBtn.prepend(weaveContainer);
+
+    attachClickEvent(this.updateBtn, () => {
+      location.reload();
+    });
+    
+    sidebarHeader.nextElementSibling.append(this.updateBtn);
+
+    // setTimeout(() => {
+    //   weave.componentDidMount();
+    //   weave.setCurrentState(GROUP_CALL_STATE.MUTED, true);
+    //   weave.setAmplitude(0);
+    //   weave.handleBlur();
+    // }, 1e3);
+
     this.inputSearch.input.addEventListener('focus', () => this.initSearch(), {once: true});
 
     //parseMenuButtonsTo(this.newButtons, this.newBtnMenu.firstElementChild.children);
@@ -224,18 +300,53 @@ export class AppSidebarLeft extends SidebarSlider {
 
     btnArchive.element.append(this.archivedCount);
 
-    rootScope.on('dialogs_archived_unread', (e) => {
-      this.archivedCount.innerText = '' + formatNumber(e.count, 1);
-      this.archivedCount.classList.toggle('hide', !e.count);
+    rootScope.addEventListener('folder_unread', (folder) => {
+      if(folder.id === 1) {
+        // const count = folder.unreadMessagesCount;
+        const count = folder.unreadDialogsCount;
+        this.archivedCount.innerText = '' + formatNumber(count, 1);
+        this.archivedCount.classList.toggle('hide', !count);
+      }
     });
 
-    appUsersManager.getTopPeers();
+    appUsersManager.getTopPeers('correspondents');
+
+    // Focus search input by pressing Escape
+    const navigationItem: NavigationItem = {
+      type: 'global-search-focus',
+      onPop: () => {
+        setTimeout(() => {
+          this.inputSearch.input.focus();
+        }, 0);
+
+        return false;
+      },
+      noHistory: true
+    };
+    appNavigationController.pushItem(navigationItem);
 
     appStateManager.getState().then(state => {
       const recentSearch = state.recentSearch || [];
       for(let i = 0, length = recentSearch.length; i < length; ++i) {
         appStateManager.requestPeer(recentSearch[i], 'recentSearch');
       }
+
+      const CHECK_UPDATE_INTERVAL = 1800e3;
+      const checkUpdateInterval = setInterval(() => {
+        fetch('version', {cache: 'no-cache'})
+        .then(res => (res.status === 200 && res.ok && res.text()) || Promise.reject())
+        .then(text => {
+          if(text !== App.versionFull) {
+            this.hasUpdate = true;
+            clearInterval(checkUpdateInterval);
+
+            if(!this.newBtnMenu.classList.contains('is-hidden')) {
+              this.updateBtn.classList.remove('is-hidden');
+            }
+          }
+        })
+        .catch(noop);
+      }, CHECK_UPDATE_INTERVAL);
     });
   }
 
@@ -251,9 +362,9 @@ export class AppSidebarLeft extends SidebarSlider {
     };
 
     this.searchGroups = {
-      contacts: new SearchGroup('Search.Chats', 'contacts', undefined, undefined, undefined, undefined, close),
-      globalContacts: new SearchGroup('Search.Global', 'contacts', undefined, undefined, undefined, undefined, close),
-      messages: new SearchGroup('Search.Messages', 'messages'),
+      contacts: new SearchGroup('SearchAllChatsShort', 'contacts', undefined, undefined, undefined, undefined, close),
+      globalContacts: new SearchGroup('GlobalSearch', 'contacts', undefined, undefined, undefined, undefined, close),
+      messages: new SearchGroup('SearchMessages', 'messages'),
       people: new SearchGroup(false, 'contacts', true, 'search-group-people', true, false, close),
       recent: new SearchGroup('Recent', 'contacts', true, 'search-group-recent', true, true, close)
     };
@@ -280,7 +391,7 @@ export class AppSidebarLeft extends SidebarSlider {
         name: 'SharedMusicTab2',
         type: 'music'
       }, {
-        inputFilter: 'inputMessagesFilterVoice',
+        inputFilter: 'inputMessagesFilterRoundVoice',
         name: 'SharedVoiceTab2',
         type: 'voice'
       }], 
@@ -296,7 +407,7 @@ export class AppSidebarLeft extends SidebarSlider {
 
     const resetSearch = () => {
       searchSuper.setQuery({
-        peerId: 0, 
+        peerId: ''.toPeerId(), 
         folderId: 0
       });
       searchSuper.selectTab(0);
@@ -306,7 +417,7 @@ export class AppSidebarLeft extends SidebarSlider {
     resetSearch();
 
     let pickedElements: HTMLElement[] = [];
-    let selectedPeerId = 0;
+    let selectedPeerId: PeerId = ''.toPeerId();
     let selectedMinDate = 0;
     let selectedMaxDate = 0;
     const updatePicked = () => {
@@ -335,7 +446,7 @@ export class AppSidebarLeft extends SidebarSlider {
         selectedMinDate = +minDate;
         selectedMaxDate = +maxDate;
       } else {
-        selectedPeerId = +key;
+        selectedPeerId = key.toPeerId();
       }
 
       target.addEventListener('click', () => {
@@ -350,22 +461,21 @@ export class AppSidebarLeft extends SidebarSlider {
 
     searchSuper.nav.parentElement.append(helper);
 
-    const renderEntity = (peerId: any, title?: string | HTMLElement) => {
+    const renderEntity = (key: PeerId | string, title?: string | HTMLElement) => {
       const div = document.createElement('div');
       div.classList.add('selector-user'/* , 'scale-in' */);
 
-      const avatarEl = document.createElement('avatar-element');
-      avatarEl.classList.add('selector-user-avatar', 'tgico');
-      avatarEl.setAttribute('dialog', '1');
-      avatarEl.classList.add('avatar-30');
+      const avatarEl = new AvatarElement();
+      avatarEl.classList.add('selector-user-avatar', 'tgico', 'avatar-30');
+      avatarEl.isDialog = true;
 
-      div.dataset.key = '' + peerId;
-      if(typeof(peerId) === 'number') {
+      div.dataset.key = '' + key;
+      if(key.isPeerId()) {
         if(title === undefined) {
-          title = new PeerTitle({peerId, onlyFirstName: true}).element;
+          title = new PeerTitle({peerId: key.toPeerId()}).element;
         }
 
-        avatarEl.setAttribute('peer', '' + peerId);
+        avatarEl.updateWithOptions({peerId: key as PeerId});
       } else {
         avatarEl.classList.add('tgico-calendarfilter');
       }
@@ -389,11 +499,11 @@ export class AppSidebarLeft extends SidebarSlider {
       if(key.indexOf('date_') === 0) {
         selectedMinDate = selectedMaxDate = 0;
       } else {
-        selectedPeerId = 0;
+        selectedPeerId = ''.toPeerId();
       }
       
       target.remove();
-      pickedElements.findAndSplice(t => t === target);
+      indexOfAndSplice(pickedElements, target);
 
       setTimeout(() => {
         updatePicked();
@@ -426,8 +536,9 @@ export class AppSidebarLeft extends SidebarSlider {
       if(!selectedPeerId && value.trim()) {
         const middleware = searchSuper.middleware.get();
         Promise.all([
-          appMessagesManager.getConversationsAll(value).then(dialogs => dialogs.map(d => d.peerId)),
-          appUsersManager.getContacts(value, true)
+          // appMessagesManager.getConversationsAll(value).then(dialogs => dialogs.map(d => d.peerId)),
+          appMessagesManager.getConversations(value).promise.then(({dialogs}) => dialogs.map(d => d.peerId)),
+          appUsersManager.getContactsPeerIds(value, true)
         ]).then(results => {
           if(!middleware()) return;
           const peerIds = new Set(results[0].concat(results[1]));
@@ -463,11 +574,11 @@ export class AppSidebarLeft extends SidebarSlider {
         return;
       }
 
-      const peerId = +target.getAttribute('data-peer-id');
+      const peerId = target.getAttribute('data-peer-id').toPeerId();
       appStateManager.getState().then(state => {
         const recentSearch = state.recentSearch || [];
         if(recentSearch[0] !== peerId) {
-          recentSearch.findAndSplice(p => p === peerId);
+          indexOfAndSplice(recentSearch, peerId);
           recentSearch.unshift(peerId);
           if(recentSearch.length > 20) {
             recentSearch.length = 20;
@@ -499,6 +610,7 @@ export class AppSidebarLeft extends SidebarSlider {
         hideNewBtnMenuTimeout = window.setTimeout(() => {
           hideNewBtnMenuTimeout = 0;
           this.newBtnMenu.classList.remove('is-hidden');
+          this.hasUpdate && this.updateBtn.classList.remove('is-hidden');
         }, 150);
       }
 
@@ -512,14 +624,16 @@ export class AppSidebarLeft extends SidebarSlider {
       this.toolsBtn.classList.remove(activeClassName);
       this.backBtn.classList.add(activeClassName);
       this.newBtnMenu.classList.add('is-hidden');
+      this.updateBtn.classList.add('is-hidden');
       this.toolsBtn.parentElement.firstElementChild.classList.toggle('state-back', true);
 
-      if(!isMobileSafari && !appNavigationController.findItemByType('global-search')) {
+      const navigationType: NavigationItem['type'] = 'global-search';
+      if(!IS_MOBILE_SAFARI && !appNavigationController.findItemByType(navigationType)) {
         appNavigationController.pushItem({
           onPop: () => {
             close();
           },
-          type: 'global-search'
+          type: navigationType
         });
       }
 
@@ -539,60 +653,113 @@ export class AppSidebarLeft extends SidebarSlider {
       transition(0);
     });
 
-    const clearRecentSearchBtn = document.createElement('button');
-    clearRecentSearchBtn.classList.add('btn-icon', 'tgico-close');
+    const clearRecentSearchBtn = ButtonIcon('close');
     this.searchGroups.recent.nameEl.append(clearRecentSearchBtn);
     clearRecentSearchBtn.addEventListener('click', () => {
-      this.searchGroups.recent.clear();
-      appStateManager.pushToState('recentSearch', []);
+      confirmationPopup({
+        descriptionLangKey: 'Search.Confirm.ClearHistory',
+        button: {
+          langKey: 'ClearButton',
+          isDanger: true
+        }
+      }).then(() => {
+        appStateManager.getState().then(state => {
+          this.searchGroups.recent.clear();
+          
+          const recentSearch = state.recentSearch || [];
+          for(const peerId of recentSearch) {
+            appStateManager.releaseSinglePeer(peerId, 'recentSearch');
+          }
+
+          recentSearch.length = 0;
+          appStateManager.pushToState('recentSearch', recentSearch);
+        });
+      });
     });
   }
 }
 
+export type SettingSectionOptions = {
+  name?: LangPackKey, 
+  nameArgs?: FormatterArguments,
+  caption?: LangPackKey | true,
+  noDelimiter?: boolean,
+  fakeGradientDelimiter?: boolean,
+  noShadow?: boolean,
+  // fullWidth?: boolean,
+  // noPaddingTop?: boolean
+};
+
+const className = 'sidebar-left-section';
 export class SettingSection {
   public container: HTMLElement;
+  public innerContainer: HTMLElement;
   public content: HTMLElement;
   public title: HTMLElement;
   public caption: HTMLElement;
 
-  constructor(options: {
-    name?: LangPackKey, 
-    caption?: LangPackKey | true,
-    noDelimiter?: boolean
-  }) {
-    this.container = document.createElement('div');
-    this.container.classList.add('sidebar-left-section');
+  private fullWidth: boolean;
 
-    if(!options.noDelimiter) {
-      const hr = document.createElement('hr');
-      this.container.append(hr);
-    } else {
-      this.container.classList.add('no-delimiter');
+  constructor(options: SettingSectionOptions = {}) {
+    const container = this.container = document.createElement('div');
+    container.classList.add(className + '-container');
+
+    const innerContainer = this.innerContainer = document.createElement('div');
+    innerContainer.classList.add(className);
+
+    if(options.noShadow) {
+      innerContainer.classList.add('no-shadow');
     }
 
-    this.content = this.generateContentElement();
+    if(options.fakeGradientDelimiter) {
+      innerContainer.append(generateDelimiter());
+      innerContainer.classList.add('with-fake-delimiter');
+    } else if(!options.noDelimiter) {
+      const hr = document.createElement('hr');
+      innerContainer.append(hr);
+    } else {
+      innerContainer.classList.add('no-delimiter');
+    }
+
+    // if(options.fullWidth) {
+    //   this.fullWidth = true;
+    // }
+
+    // if(options.noPaddingTop) {
+    //   innerContainer.classList.add('no-padding-top');
+    // }
+
+    const content = this.content = this.generateContentElement();
 
     if(options.name) {
-      this.title = document.createElement('div');
-      this.title.classList.add('sidebar-left-h2', 'sidebar-left-section-name');
-      i18n_({element: this.title, key: options.name});
-      this.content.append(this.title);
+      const title = this.title = document.createElement('div');
+      title.classList.add('sidebar-left-h2', className + '-name');
+      i18n_({element: title, key: options.name, args: options.nameArgs});
+      content.append(title);
     }
 
+    container.append(innerContainer);
+
     if(options.caption) {
-      this.caption = this.generateContentElement();
-      this.caption.classList.add('sidebar-left-section-caption');
+      const caption = this.caption = this.generateContentElement();
+      caption.classList.add(className + '-caption');
+      container.append(caption);
 
       if(options.caption !== true) {
-        i18n_({element: this.caption, key: options.caption});
+        i18n_({element: caption, key: options.caption});
       }
     }
   }
 
   public generateContentElement() {
     const content = document.createElement('div');
-    content.classList.add('sidebar-left-section-content');
-    this.container.append(content);
+    content.classList.add(className + '-content');
+
+    // if(this.fullWidth) {
+    //   content.classList.add('full-width');
+    // }
+
+    this.innerContainer.append(content);
     return content;
   }
 }
@@ -602,6 +769,31 @@ export const generateSection = (appendTo: Scrollable, name?: LangPackKey, captio
   appendTo.append(section.container);
   return section.content;
 };
+
+export const generateDelimiter = () => {
+  const delimiter = document.createElement('div');
+  delimiter.classList.add('gradient-delimiter');
+  return delimiter;
+};
+
+export class SettingChatListSection extends SettingSection {
+  public sortedList: SortedUserList;
+
+  constructor(options: SettingSectionOptions & {sortedList: SortedUserList}) {
+    super(options);
+
+    this.sortedList = options.sortedList;
+
+    this.content.append(this.sortedList.list);
+  }
+
+  public makeButton(options: ButtonOptions) {
+    const button = Button('folder-category-button btn btn-primary btn-transparent', options);
+    if(this.title) this.content.insertBefore(button, this.title.nextSibling);
+    else this.content.prepend(button);
+    return button;
+  }
+}
 
 const appSidebarLeft = new AppSidebarLeft();
 MOUNT_CLASS_TO.appSidebarLeft = appSidebarLeft;

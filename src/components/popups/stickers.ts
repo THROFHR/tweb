@@ -5,7 +5,7 @@
  */
 
 import PopupElement from ".";
-import appStickersManager from "../../lib/appManagers/appStickersManager";
+import appStickersManager, { AppStickersManager } from "../../lib/appManagers/appStickersManager";
 import { RichTextProcessor } from "../../lib/richtextprocessor";
 import Scrollable from "../scrollable";
 import { wrapSticker } from "../wrappers";
@@ -19,6 +19,9 @@ import { i18n } from "../../lib/langPack";
 import Button from "../button";
 import findUpClassName from "../../helpers/dom/findUpClassName";
 import toggleDisability from "../../helpers/dom/toggleDisability";
+import { attachClickEvent } from "../../helpers/dom/clickEvent";
+import { toastNew } from "../toast";
+import setInnerHTML from "../../helpers/dom/setInnerHTML";
 
 const ANIMATION_GROUP = 'STICKERS-POPUP';
 
@@ -29,11 +32,7 @@ export default class PopupStickers extends PopupElement {
 
   private set: StickerSet.stickerSet;
 
-  constructor(private stickerSetInput: {
-    //_: 'inputStickerSetID',
-    id: string,
-    access_hash: string
-  }) {
+  constructor(private stickerSetInput: Parameters<AppStickersManager['getStickerSet']>[0]) {
     super('popup-stickers', null, {closable: true, overlayClosable: true, body: true});
 
     this.h6 = document.createElement('h6');
@@ -41,17 +40,17 @@ export default class PopupStickers extends PopupElement {
 
     this.header.append(this.h6);
 
-    this.onClose = () => {
+    this.addEventListener('close', () => {
       animationIntersector.setOnlyOnePlayableGroup('');
-      this.stickersFooter.removeEventListener('click', this.onFooterClick);
-      this.stickersDiv.removeEventListener('click', this.onStickersClick);
-    };
+    });
 
     const div = document.createElement('div');
     div.classList.add('sticker-set');
 
     this.stickersDiv = document.createElement('div');
     this.stickersDiv.classList.add('sticker-set-stickers', 'is-loading');
+
+    attachClickEvent(this.stickersDiv, this.onStickersClick, {listenerSetter: this.listenerSetter});
 
     putPreloader(this.stickersDiv, true);
 
@@ -75,17 +74,7 @@ export default class PopupStickers extends PopupElement {
     this.loadStickerSet();
   }
 
-  onFooterClick = () => {
-    const toggle = toggleDisability([this.stickersFooter], true);
-
-    appStickersManager.toggleStickerSet(this.set).then(() => {
-      this.hide();
-    }).catch(() => {
-      toggle();
-    });
-  };
-
-  onStickersClick = (e: MouseEvent) => {
+  private onStickersClick = (e: MouseEvent) => {
     const target = findUpClassName(e.target, 'sticker-set-sticker');
     if(!target) return;
 
@@ -99,13 +88,18 @@ export default class PopupStickers extends PopupElement {
 
   private loadStickerSet() {
     return appStickersManager.getStickerSet(this.stickerSetInput).then(set => {
+      if(!set) {
+        toastNew({langPackKey: 'StickerSet.DontExist'});
+        this.hide();
+        return;
+      }
       //console.log('PopupStickers loadStickerSet got set:', set);
 
       this.set = set.set;
 
       animationIntersector.setOnlyOnePlayableGroup(ANIMATION_GROUP);
 
-      this.h6.innerHTML = RichTextProcessor.wrapEmojiText(set.set.title);
+      setInnerHTML(this.h6, RichTextProcessor.wrapEmojiText(set.set.title));
       this.stickersFooter.classList.toggle('add', !set.set.installed_date);
 
       let button: HTMLElement;
@@ -120,11 +114,15 @@ export default class PopupStickers extends PopupElement {
       this.stickersFooter.textContent = '';
       this.stickersFooter.append(button);
 
-      button.addEventListener('click', this.onFooterClick);
+      attachClickEvent(button, () => {
+        const toggle = toggleDisability([button], true);
 
-      if(set.documents.length) {
-        this.stickersDiv.addEventListener('click', this.onStickersClick);
-      }
+        appStickersManager.toggleStickerSet(this.set).then(() => {
+          this.hide();
+        }).catch(() => {
+          toggle();
+        });
+      });
 
       const lazyLoadQueue = new LazyLoadQueue();
       

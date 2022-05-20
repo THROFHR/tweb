@@ -11,7 +11,7 @@ import appChatsManager from "./appChatsManager";
 import appUsersManager from "./appUsersManager";
 import apiUpdatesManager from "./apiUpdatesManager";
 import rootScope from "../rootScope";
-import { convertInputKeyToKey } from "../../helpers/string";
+import convertInputKeyToKey from "../../helpers/string/convertInputKeyToKey";
 
 export enum PrivacyType {
   Everybody = 2,
@@ -29,7 +29,7 @@ export class AppPrivacyManager {
       updatePrivacy: (update) => {
         const key = update.key._;
         this.privacy[key] = update.rules;
-        rootScope.broadcast('privacy_update', update);
+        rootScope.dispatchEvent('privacy_update', update);
       }
     });
   }
@@ -44,20 +44,17 @@ export class AppPrivacyManager {
       appUsersManager.saveApiUsers(privacyRules.users);
       appChatsManager.saveApiChats(privacyRules.chats);
 
-      apiUpdatesManager.processUpdateMessage({
-        _: 'updateShort',
-        update: {
-          _: 'updatePrivacy',
-          key: {
-            _: convertInputKeyToKey(inputKey)
-          },
-          rules: rules.map(inputRule => {
-            const rule: PrivacyRule = {} as any;
-            Object.assign(rule, inputRule);
-            rule._ = convertInputKeyToKey(rule._) as any;
-            return rule;
-          })
-        } as Update.updatePrivacy
+      apiUpdatesManager.processLocalUpdate({
+        _: 'updatePrivacy',
+        key: {
+          _: convertInputKeyToKey(inputKey)
+        },
+        rules: rules.map(inputRule => {
+          const rule: PrivacyRule = {} as any;
+          Object.assign(rule, inputRule);
+          rule._ = convertInputKeyToKey(rule._) as any;
+          return rule;
+        })
       });
 
       //console.log('privacy rules', inputKey, privacyRules, privacyRules.rules);
@@ -90,7 +87,7 @@ export class AppPrivacyManager {
   public getPrivacyRulesDetails(rules: PrivacyRule[]) {
     const types: PrivacyType[] = [];
 
-    type peers = {users: number[], chats: number[]};
+    type peers = {users: UserId[], chats: ChatId[]};
     let allowPeers: peers = {users: [], chats: []}, disallowPeers: peers = {users: [], chats: []};
     rules.forEach(rule => {
       switch(rule._) {

@@ -11,10 +11,9 @@
 
 import { MOUNT_CLASS_TO } from "../../config/debug";
 import { tsNow } from "../../helpers/date";
-import renderImageFromUrl from "../../helpers/dom/renderImageFromUrl";
-import replaceContent from "../../helpers/dom/replaceContent";
-import sequentialDom from "../../helpers/sequentialDom";
-import { ChannelParticipantsFilter, ChannelsChannelParticipants, Chat, ChatFull, ChatParticipants, ChatPhoto, ExportedChatInvite, InputChannel, InputFile, InputFileLocation, PhotoSize, Update, UserFull, UserProfilePhoto } from "../../layer";
+import numberThousandSplitter from "../../helpers/number/numberThousandSplitter";
+import { ChannelParticipantsFilter, ChannelsChannelParticipants, ChannelParticipant, Chat, ChatFull, ChatParticipants, ChatPhoto, ExportedChatInvite, InputChannel, InputFile, SendMessageAction, Update, UserFull, Photo, PhotoSize } from "../../layer";
+import { LangPackKey, i18n } from "../langPack";
 //import apiManager from '../mtproto/apiManager';
 import apiManager from '../mtproto/mtprotoworker';
 import { RichTextProcessor } from "../richtextprocessor";
@@ -22,25 +21,19 @@ import rootScope from "../rootScope";
 import SearchIndex from "../searchIndex";
 import apiUpdatesManager from "./apiUpdatesManager";
 import appChatsManager from "./appChatsManager";
-import appDownloadManager from "./appDownloadManager";
+import appMessagesIdsManager from "./appMessagesIdsManager";
 import appNotificationsManager from "./appNotificationsManager";
 import appPeersManager from "./appPeersManager";
-import appPhotosManager, { MyPhoto } from "./appPhotosManager";
-import appUsersManager, { User } from "./appUsersManager";
+import appPhotosManager from "./appPhotosManager";
+import appUsersManager, { MyTopPeer, User } from "./appUsersManager";
 
-type PeerPhotoSize = 'photo_small' | 'photo_big';
+export type UserTyping = Partial<{userId: UserId, action: SendMessageAction, timeout: number}>;
 
 export class AppProfileManager {
   //private botInfos: any = {};
-  private usersFull: {[id: string]: UserFull.userFull} = {};
-  public chatsFull: {[id: string]: ChatFull} = {};
-  private fullPromises: {[peerId: string]: Promise<ChatFull.chatFull | ChatFull.channelFull | UserFull>} = {};
-
-  private savedAvatarURLs: {
-    [peerId: number]: {
-      [size in PeerPhotoSize]?: string | Promise<string>
-    }
-  } = {};
+  private usersFull: {[id: UserId]: UserFull.userFull} = {};
+  private chatsFull: {[id: ChatId]: ChatFull} = {};
+  private typingsInPeer: {[peerId: PeerId]: UserTyping[]};
 
   constructor() {
     rootScope.addMultipleEventsListeners({
@@ -51,7 +44,7 @@ export class AppProfileManager {
           const chatFull = this.chatsFull[chatId] as ChatFull.chatFull;
           if(chatFull !== undefined) {
             chatFull.participants = participants;
-            rootScope.broadcast('chat_full_update', chatId);
+            rootScope.dispatchEvent('chat_full_update', chatId);
           }
         }
       },
@@ -75,7 +68,7 @@ export class AppProfileManager {
           });
 
           _participants.version = update.version;
-          rootScope.broadcast('chat_full_update', update.chat_id);
+          rootScope.dispatchEvent('chat_full_update', update.chat_id);
         }
       },
 
@@ -88,39 +81,70 @@ export class AppProfileManager {
             if(participants[i].user_id === update.user_id) {
               participants.splice(i, 1);
               _participants.version = update.version;
-              rootScope.broadcast('chat_full_update', update.chat_id);
+              rootScope.dispatchEvent('chat_full_update', update.chat_id);
               return;
             }
           }
         }
-      }
+      },
+
+      updateUserTyping: this.onUpdateUserTyping,
+      updateChatUserTyping: this.onUpdateUserTyping,
+      updateChannelUserTyping: this.onUpdateUserTyping,
+
+      updatePeerBlocked: this.onUpdatePeerBlocked
     });
 
-    rootScope.on('chat_update', (chatId) => {
+    rootScope.addEventListener('chat_update', (chatId) => {
       const fullChat = this.chatsFull[chatId];
-      const chat: Chat.chat = appChatsManager.getChat(chatId);
-      if(!chat.photo || !fullChat) {
+      const chat: Chat.chat | Chat.channel | Chat.chatForbidden | Chat.channelForbidden = appChatsManager.getChat(chatId);
+      if(!fullChat || !chat) {
         return;
       }
 
-      const emptyPhoto = chat.photo._ === 'chatPhotoEmpty';
-      //////console.log('chat_update:', fullChat);
-      if(fullChat.chat_photo && emptyPhoto !== (fullChat.chat_photo._ === 'photoEmpty')) {
-        delete this.chatsFull[chatId];
-        rootScope.broadcast('chat_full_update', chatId);
-        return;
-      }
-      if(emptyPhoto) {
-        return;
+      let updated = false;
+      if(!!fullChat.call !== !!(chat as Chat.chat).pFlags?.call_active) {
+        updated = true;
       }
 
-      const photoId = (chat.photo as ChatPhoto.chatPhoto).photo_id;
-      const chatFullPhotoId = fullChat.chat_photo?.id;
-      if(chatFullPhotoId !== photoId) {
-        delete this.chatsFull[chatId];
-        rootScope.broadcast('chat_full_update', chatId);
+      const {photo} = chat as Chat.chat;
+      if(photo) {
+        const hasChatPhoto = photo._ !== 'chatPhotoEmpty';
+        const hasFullChatPhoto = !!(fullChat.chat_photo && fullChat.chat_photo._ !== 'photoEmpty'); // chat_photo can be missing
+        if(
+          hasChatPhoto !== hasFullChatPhoto || (
+            hasChatPhoto && 
+            photo.photo_id !== fullChat.chat_photo?.id
+          )
+        ) {
+          updated = true;
+        }
+      }
+
+      if(updated) {
+        this.refreshFullPeer(chatId.toPeerId(true));
       }
     });
+
+    rootScope.addEventListener('channel_update', (chatId) => {
+      this.refreshFullPeer(chatId.toPeerId(true));
+    });
+
+    // * genius
+    rootScope.addEventListener('chat_full_update', (chatId) => {
+      rootScope.dispatchEvent('peer_full_update', chatId.toPeerId(true));
+    });
+    
+    // * genius
+    rootScope.addEventListener('user_full_update', (userId) => {
+      rootScope.dispatchEvent('peer_full_update', userId.toPeerId(false));
+    });
+
+    rootScope.addEventListener('invalidate_participants', (chatId) => {
+      this.invalidateChannelParticipants(chatId);
+    });
+
+    this.typingsInPeer = {};
   }
 
   /* public saveBotInfo(botInfo: any) {
@@ -143,61 +167,74 @@ export class AppProfileManager {
     };
   } */
 
-  public getProfile(id: number, override?: true): Promise<UserFull> {
+  public getProfile(id: UserId, override?: true) {
     if(this.usersFull[id] && !override) {
-      return Promise.resolve(this.usersFull[id]);
+      return this.usersFull[id];
     }
 
-    if(this.fullPromises[id]) {
-      return this.fullPromises[id] as any;
-    }
+    return apiManager.invokeApiSingleProcess({
+      method: 'users.getFullUser', 
+      params: {
+        id: appUsersManager.getUserInput(id)
+      },
+      processResult: (usersUserFull) => {
+        appChatsManager.saveApiChats(usersUserFull.chats, true);
+        appUsersManager.saveApiUsers(usersUserFull.users);
 
-    return this.fullPromises[id] = apiManager.invokeApi('users.getFullUser', {
-      id: appUsersManager.getUserInput(id)
-    }).then((userFull) => {
-      const user = userFull.user as User;
-      appUsersManager.saveApiUser(user, true);
+        const userFull = usersUserFull.full_user;
+        const peerId = id.toPeerId(false);
+        if(userFull.profile_photo) {
+          userFull.profile_photo = appPhotosManager.savePhoto(userFull.profile_photo, {type: 'profilePhoto', peerId});
+        }
 
-      if(userFull.profile_photo) {
-        userFull.profile_photo = appPhotosManager.savePhoto(userFull.profile_photo, {type: 'profilePhoto', peerId: id});
-      }
+        appNotificationsManager.savePeerSettings({
+          peerId, 
+          settings: userFull.notify_settings
+        });
 
-      if(userFull.about !== undefined) {
-        userFull.rAbout = RichTextProcessor.wrapRichText(userFull.about, {noLinebreaks: true});
-      }
+        this.usersFull[id] = userFull;
 
-      appNotificationsManager.savePeerSettings(id, userFull.notify_settings);
+        /* if(userFull.bot_info) {
+          userFull.bot_info = this.saveBotInfo(userFull.bot_info) as any;
+        } */
 
-      /* if(userFull.bot_info) {
-        userFull.bot_info = this.saveBotInfo(userFull.bot_info) as any;
-      } */
+        //appMessagesManager.savePinnedMessage(id, userFull.pinned_msg_id);
 
-      //appMessagesManager.savePinnedMessage(id, userFull.pinned_msg_id);
-
-      delete this.fullPromises[id];
-
-      return this.usersFull[id] = userFull;
-    }) as any;
-  }
-
-  public getProfileByPeerId(peerId: number, override?: true): Promise<ChatFull.chatFull | ChatFull.channelFull | UserFull.userFull> {
-    if(peerId < 0) return this.getChatFull(-peerId, override);
-    else return this.getProfile(peerId, override);
-  }
-
-  public getFullPhoto(peerId: number) {
-    return this.getProfileByPeerId(peerId).then(profile => {
-      switch(profile._) {
-        case 'userFull':
-          return profile.profile_photo;
-        case 'channelFull':
-        case 'chatFull':
-          return profile.chat_photo;
+        rootScope.dispatchEvent('user_full_update', id);
+        return userFull;
       }
     });
   }
 
-  /* public getPeerBots(peerId: number) {
+  public getProfileByPeerId(peerId: PeerId, override?: true) {
+    if(appPeersManager.isAnyChat(peerId)) return this.getChatFull(peerId.toChatId(), override);
+    else return this.getProfile(peerId.toUserId(), override);
+  }
+
+  public getCachedFullChat(chatId: ChatId) {
+    return this.chatsFull[chatId];
+  }
+
+  public getCachedFullUser(userId: UserId) {
+    return this.usersFull[userId];
+  }
+
+  public getCachedProfileByPeerId(peerId: PeerId) {
+    return peerId.isUser() ? this.getCachedFullUser(peerId.toUserId()) : this.getCachedFullChat(peerId.toChatId());
+  }
+
+  public async getFullPhoto(peerId: PeerId) {
+    const profile = await this.getProfileByPeerId(peerId);
+    switch(profile._) {
+      case 'userFull':
+        return profile.profile_photo;
+      case 'channelFull':
+      case 'chatFull':
+        return profile.chat_photo;
+    }
+  }
+
+  /* public getPeerBots(peerId: PeerId) {
     var peerBots: any[] = [];
     if(peerId >= 0 && !appUsersManager.isBot(peerId) ||
       (appPeersManager.isChannel(peerId) && !appPeersManager.isMegagroup(peerId))) {
@@ -213,7 +250,7 @@ export class AppProfileManager {
       });
     }
 
-    return this.getChatFull(-peerId).then((chatFull: any) => {
+    return this.getChatFull(peerId.toChatId()).then((chatFull: any) => {
       chatFull.bot_info.forEach((botInfo: any) => {
         peerBots.push(this.saveBotInfo(botInfo))
       });
@@ -221,7 +258,7 @@ export class AppProfileManager {
     });
   } */
 
-  public getChatFull(id: number, override?: true): Promise<ChatFull.chatFull | ChatFull.channelFull> {
+  public getChatFull(id: ChatId, override?: true) {
     if(appChatsManager.isChannel(id)) {
       return this.getChannelFull(id, override);
     }
@@ -231,62 +268,63 @@ export class AppProfileManager {
       const chat = appChatsManager.getChat(id);
       if(chat.version === (fullChat.participants as ChatParticipants.chatParticipants).version ||
         chat.pFlags.left) {
-        return Promise.resolve(fullChat);
+        return fullChat as ChatFull;
       }
     }
-
-    const peerId = -id;
-    if(this.fullPromises[peerId] !== undefined) {
-      return this.fullPromises[peerId] as any;
-    }
-
-    // console.trace(dT(), 'Get chat full', id, appChatsManager.getChat(id))
-    return this.fullPromises[peerId] = apiManager.invokeApi('messages.getFullChat', {
-      chat_id: id
-    }).then((result) => {
-      appChatsManager.saveApiChats(result.chats, true);
-      appUsersManager.saveApiUsers(result.users);
-      const fullChat = result.full_chat as ChatFull.chatFull;
-      if(fullChat && fullChat.chat_photo && fullChat.chat_photo.id) {
-        fullChat.chat_photo = appPhotosManager.savePhoto(fullChat.chat_photo, {type: 'profilePhoto', peerId: peerId});
-      }
-
-      //appMessagesManager.savePinnedMessage(peerId, fullChat.pinned_msg_id);
-      appNotificationsManager.savePeerSettings(peerId, fullChat.notify_settings);
-      delete this.fullPromises[peerId];
-      this.chatsFull[id] = fullChat;
-      rootScope.broadcast('chat_full_update', id);
-
-      return fullChat;
-    }) as any;
-  }
-
-  public getChatInviteLink(id: number, force?: boolean) {
-    return this.getChatFull(id).then((chatFull) => {
-      if(!force &&
-        chatFull.exported_invite &&
-        chatFull.exported_invite._ == 'chatInviteExported') {
-        return chatFull.exported_invite.link;
-      }
-      
-      return apiManager.invokeApi('messages.exportChatInvite', {
-        peer: appPeersManager.getInputPeerById(-id)
-      }).then((exportedInvite) => {
-        if(this.chatsFull[id] !== undefined) {
-          this.chatsFull[id].exported_invite = exportedInvite;
+    
+    return apiManager.invokeApiSingleProcess({
+      method: 'messages.getFullChat', 
+      params: {
+        chat_id: id
+      },
+      processResult: (result) => {
+        appChatsManager.saveApiChats(result.chats, true);
+        appUsersManager.saveApiUsers(result.users);
+        const fullChat = result.full_chat as ChatFull.chatFull;
+        const peerId = id.toPeerId(true);
+        if(fullChat && fullChat.chat_photo && fullChat.chat_photo.id) {
+          fullChat.chat_photo = appPhotosManager.savePhoto(fullChat.chat_photo, {type: 'profilePhoto', peerId});
         }
 
-        return (exportedInvite as ExportedChatInvite.chatInviteExported).link;
-      });
+        //appMessagesManager.savePinnedMessage(peerId, fullChat.pinned_msg_id);
+        appNotificationsManager.savePeerSettings({
+          peerId, 
+          settings: fullChat.notify_settings
+        });
+        
+        this.chatsFull[id] = fullChat;
+        rootScope.dispatchEvent('chat_full_update', id);
+
+        return fullChat;
+      }
     });
   }
 
-  public getChannelParticipants(id: number, filter: ChannelParticipantsFilter = {_: 'channelParticipantsRecent'}, limit = 200, offset = 0) {
+  public async getChatInviteLink(id: ChatId, force?: boolean) {
+    const chatFull = await this.getChatFull(id);
+    if(!force &&
+      chatFull.exported_invite &&
+      chatFull.exported_invite._ == 'chatInviteExported') {
+      return chatFull.exported_invite.link;
+    }
+    
+    return apiManager.invokeApi('messages.exportChatInvite', {
+      peer: appPeersManager.getInputPeerById(id.toPeerId(true))
+    }).then((exportedInvite) => {
+      if(this.chatsFull[id] !== undefined) {
+        this.chatsFull[id].exported_invite = exportedInvite;
+      }
+
+      return (exportedInvite as ExportedChatInvite.chatInviteExported).link;
+    });
+  }
+
+  public getChannelParticipants(id: ChatId, filter: ChannelParticipantsFilter = {_: 'channelParticipantsRecent'}, limit = 200, offset = 0) {
     if(filter._ === 'channelParticipantsRecent') {
       const chat = appChatsManager.getChat(id);
       if(chat &&
           chat.pFlags && (
-            chat.pFlags.kicked ||
+            // chat.pFlags.kicked ||
             chat.pFlags.broadcast && !chat.pFlags.creator && !chat.admin_rights
           )) {
         return Promise.reject();
@@ -298,7 +336,7 @@ export class AppProfileManager {
       filter,
       offset,
       limit,
-      hash: 0
+      hash: '0'
     }, {cacheSeconds: 60}).then(result => {
       appUsersManager.saveApiUsers((result as ChannelsChannelParticipants.channelsChannelParticipants).users);
       return result as ChannelsChannelParticipants.channelsChannelParticipants;
@@ -330,7 +368,7 @@ export class AppProfileManager {
     } */
   }
 
-  public getChannelParticipant(id: number, peerId: number) {
+  public getChannelParticipant(id: ChatId, peerId: PeerId) {
     return apiManager.invokeApiSingle('channels.getParticipant', {
       channel: appChatsManager.getChannelInput(id),
       participant: appPeersManager.getInputPeerById(peerId),
@@ -340,79 +378,146 @@ export class AppProfileManager {
     });
   }
 
-  public getChannelFull(id: number, override?: true): Promise<ChatFull.channelFull> {
+  public getChannelFull(id: ChatId, override?: true) {
     if(this.chatsFull[id] !== undefined && !override) {
-      return Promise.resolve(this.chatsFull[id] as ChatFull.channelFull);
+      return this.chatsFull[id] as ChatFull.channelFull;
     }
 
-    const peerId = -id;
-    if(this.fullPromises[peerId] !== undefined) {
-      return this.fullPromises[peerId] as any;
-    }
+    return apiManager.invokeApiSingleProcess({
+      method: 'channels.getFullChannel', 
+      params: {
+        channel: appChatsManager.getChannelInput(id)
+      }, 
+      processResult: (result) => {
+        const peerId = id.toPeerId(true);
+        appChatsManager.saveApiChats(result.chats, true);
+        appUsersManager.saveApiUsers(result.users);
+        const fullChannel = result.full_chat as ChatFull.channelFull;
+        if(fullChannel && fullChannel.chat_photo.id) {
+          fullChannel.chat_photo = appPhotosManager.savePhoto(fullChannel.chat_photo, {type: 'profilePhoto', peerId});
+          //appPhotosManager.savePhoto(fullChannel.chat_photo);
+        }
+        appNotificationsManager.savePeerSettings({
+          peerId, 
+          settings: fullChannel.notify_settings
+        });
 
-    return this.fullPromises[peerId] = apiManager.invokeApi('channels.getFullChannel', {
-      channel: appChatsManager.getChannelInput(id)
-    }).then((result) => {
-      appChatsManager.saveApiChats(result.chats, true);
-      appUsersManager.saveApiUsers(result.users);
-      const fullChannel = result.full_chat as ChatFull.channelFull;
-      if(fullChannel && fullChannel.chat_photo.id) {
-        fullChannel.chat_photo = appPhotosManager.savePhoto(fullChannel.chat_photo, {type: 'profilePhoto', peerId});
-        //appPhotosManager.savePhoto(fullChannel.chat_photo);
+        this.chatsFull[id] = fullChannel;
+        rootScope.dispatchEvent('chat_full_update', id);
+
+        return fullChannel;
+      }, 
+      processError: (error) => {
+        switch(error.type) {
+          case 'CHANNEL_PRIVATE':
+            let channel = appChatsManager.getChat(id);
+            channel = {_: 'channelForbidden', access_hash: channel.access_hash, title: channel.title};
+            apiUpdatesManager.processUpdateMessage({
+              _: 'updates',
+              updates: [{
+                _: 'updateChannel',
+                channel_id: id
+              } as Update.updateChannel],
+              chats: [channel],
+              users: []
+            });
+            break;
+        }
+
+        throw error;
       }
-      appNotificationsManager.savePeerSettings(peerId, fullChannel.notify_settings);
-
-      delete this.fullPromises[peerId];
-      this.chatsFull[id] = fullChannel;
-      rootScope.broadcast('chat_full_update', id);
-
-      return fullChannel;
-    }, (error) => {
-      switch (error.type) {
-        case 'CHANNEL_PRIVATE':
-          let channel = appChatsManager.getChat(id);
-          channel = {_: 'channelForbidden', access_hash: channel.access_hash, title: channel.title};
-          apiUpdatesManager.processUpdateMessage({
-            _: 'updates',
-            updates: [{
-              _: 'updateChannel',
-              channel_id: id
-            } as Update.updateChannel],
-            chats: [channel],
-            users: []
-          });
-          break;
-      }
-
-      return Promise.reject(error);
-    }) as any;
-  }
-
-  public getMentions(chatId: number, query: string): Promise<number[]> {
-    return (this.getChatFull(chatId) as Promise<ChatFull.chatFull>).then(chatFull => {
-      const index = new SearchIndex<number>(true, true);
-      (chatFull.participants as ChatParticipants.chatParticipants).participants.forEach(participant => {
-        index.indexObject(participant.user_id, appUsersManager.getUserSearchText(participant.user_id));
-      });
-
-      return Array.from(index.search(query));
     });
   }
 
-  public invalidateChannelParticipants(id: number) {
-    delete this.chatsFull[id];
-    delete this.fullPromises[-id];
-    apiManager.clearCache('channels.getParticipants', (params) => (params.channel as InputChannel.inputChannel).channel_id === id);
-    rootScope.broadcast('chat_full_update', id);
+  public getMentions(chatId: ChatId, query: string, threadId?: number): Promise<PeerId[]> {
+    const processUserIds = (topPeers: MyTopPeer[]) => {
+      const startsWithAt = query.charAt(0) === '@';
+      if(startsWithAt) query = query.slice(1);
+      /* const startsWithAt = query.charAt(0) === '@';
+      if(startsWithAt) query = query.slice(1);
+      
+      const index = new SearchIndex<number>(!startsWithAt, !startsWithAt); */
+      const index = new SearchIndex<PeerId>({
+        ignoreCase: true
+      });
+
+      const ratingMap: Map<PeerId, number> = new Map();
+      topPeers.forEach(peer => {
+        index.indexObject(peer.id, appUsersManager.getUserSearchText(peer.id));
+        ratingMap.set(peer.id, peer.rating);
+      });
+
+      const peerIds = Array.from(index.search(query));
+      peerIds.sort((a, b) => ratingMap.get(b) - ratingMap.get(a));
+      return peerIds;
+    };
+
+    let promise: Promise<PeerId[]>;
+    if(appChatsManager.isChannel(chatId)) {
+      promise = this.getChannelParticipants(chatId, {
+        _: 'channelParticipantsMentions',
+        q: query,
+        top_msg_id: appMessagesIdsManager.getServerMessageId(threadId)
+      }, 50, 0).then(cP => {
+        return cP.participants.map(p => appChatsManager.getParticipantPeerId(p));
+      });
+    } else if(chatId) {
+      promise = Promise.resolve(this.getChatFull(chatId)).then(chatFull => {
+        return ((chatFull as ChatFull.chatFull).participants as ChatParticipants.chatParticipants).participants.map(p => p.user_id.toPeerId());
+      });
+    } else {
+      promise = Promise.resolve([]);
+    }
+
+    return Promise.all([
+      // [],
+      appUsersManager.getTopPeers('bots_inline').catch(() => [] as MyTopPeer[]), 
+      promise
+    ]).then(results => {
+      const peers = results[0].concat(results[1].map(peerId => ({id: peerId, rating: 0})));
+
+      return processUserIds(peers);
+    });
   }
 
-  public updateProfile(first_name: string, last_name: string, about: string) {
+  public invalidateChannelParticipants(id: ChatId) {
+    apiManager.clearCache('channels.getParticipants', (params) => (params.channel as InputChannel.inputChannel).channel_id === id);
+    this.refreshFullPeer(id.toPeerId(true));
+  }
+
+  private refreshFullPeer(peerId: PeerId) {
+    if(peerId.isUser()) {
+      const userId = peerId.toUserId();
+      delete this.usersFull[userId];
+      rootScope.dispatchEvent('user_full_update', userId);
+    } else {
+      const chatId = peerId.toChatId();
+      delete this.chatsFull[chatId];
+      rootScope.dispatchEvent('chat_full_update', chatId);
+    }
+
+    // ! эта строчка будет создавать race condition:
+    // ! запрос вернёт chat с установленным флагом call_not_empty, хотя сам апдейт уже будет применён
+    // this.getProfileByPeerId(peerId, true);
+  }
+
+  public updateProfile(first_name?: string, last_name?: string, about?: string) {
     return apiManager.invokeApi('account.updateProfile', {
       first_name,
       last_name,
       about
     }).then(user => {
       appUsersManager.saveApiUser(user);
+
+      if(about !== undefined) {
+        const peerId = user.id.toPeerId();
+        const userFull = this.usersFull[user.id];
+        if(userFull) {
+          userFull.about = about;
+        }
+  
+        rootScope.dispatchEvent('peer_bio_edit', peerId);
+      }
       
       return this.getProfile(rootScope.myId, true);
     });
@@ -422,6 +527,23 @@ export class AppProfileManager {
     return apiManager.invokeApi('photos.uploadProfilePhoto', {
       file: inputFile
     }).then((updateResult) => {
+      // ! sometimes can have no user in users
+      const photo = updateResult.photo as Photo.photo;
+      if(!updateResult.users.length) {
+        const strippedThumb = photo.sizes.find(size => size._ === 'photoStrippedSize') as PhotoSize.photoStrippedSize;
+        updateResult.users.push({
+          ...appUsersManager.getSelf(), 
+          photo: {
+            _: 'userProfilePhoto',
+            dc_id: photo.dc_id,
+            photo_id: photo.id,
+            stripped_thumb: strippedThumb?.bytes,
+            pFlags: {
+
+            }
+          }
+        });
+      }
       appUsersManager.saveApiUsers(updateResult.users);
 
       const myId = rootScope.myId;
@@ -430,178 +552,187 @@ export class AppProfileManager {
         peerId: myId
       });
 
-      apiUpdatesManager.processUpdateMessage({
-        _: 'updateShort',
-        update: {
-          _: 'updateUserPhoto',
-          user_id: myId,
-          date: tsNow(true),
-          photo: appUsersManager.getUser(myId).photo,
-          previous: true
-        } as Update.updateUserPhoto
+      const userId = myId.toUserId();
+      apiUpdatesManager.processLocalUpdate({
+        _: 'updateUserPhoto',
+        user_id: userId,
+        date: tsNow(true),
+        photo: appUsersManager.getUser(userId).photo,
+        previous: true
       });
     });
   }
 
-  public removeFromAvatarsCache(peerId: number) {
-    if(this.savedAvatarURLs[peerId]) {
-      delete this.savedAvatarURLs[peerId];
-    }
-  }
-
-  public loadAvatar(peerId: number, photo: UserProfilePhoto.userProfilePhoto | ChatPhoto.chatPhoto, size: PeerPhotoSize) {
-    const inputPeer = appPeersManager.getInputPeerById(peerId);
-
-    let cached = false;
-    let getAvatarPromise: Promise<string>;
-    let saved = this.savedAvatarURLs[peerId];
-    if(!saved || !saved[size]) {
-      if(!saved) {
-        saved = this.savedAvatarURLs[peerId] = {};
-      }
-
-      //console.warn('will invoke downloadSmallFile:', peerId);
-      const peerPhotoFileLocation: InputFileLocation.inputPeerPhotoFileLocation = {
-        _: 'inputPeerPhotoFileLocation', 
-        pFlags: {},
-        peer: inputPeer, 
-        photo_id: photo.photo_id
-      };
-
-      if(size === 'photo_big') {
-        peerPhotoFileLocation.pFlags.big = true;
-      }
-
-      const downloadOptions = {dcId: photo.dc_id, location: peerPhotoFileLocation};
-
-      /* let str: string;
-      const time = Date.now();
-      if(peerId === 0) {
-        str = `download avatar ${peerId}`;
-      } */
-
-      const promise = appDownloadManager.download(downloadOptions);
-      getAvatarPromise = saved[size] = promise.then(blob => {
-        return saved[size] = URL.createObjectURL(blob);
-
-        /* if(str) {
-          console.log(str, Date.now() / 1000, Date.now() - time);
-        } */
-      });
-    } else if(typeof(saved[size]) !== 'string') {
-      getAvatarPromise = saved[size] as Promise<any>;
-    } else {
-      getAvatarPromise = Promise.resolve(saved[size]);
-      cached = true;
-    }
-
-    return {cached, loadPromise: getAvatarPromise};
-  }
-
-  public putAvatar(div: HTMLElement, peerId: number, photo: UserProfilePhoto.userProfilePhoto | ChatPhoto.chatPhoto, size: PeerPhotoSize, img = new Image()) {
-    const {cached, loadPromise} = this.loadAvatar(peerId, photo, size);
-
-    let callback: () => void;
-    if(cached) {
-      // смотри в misc.ts: renderImageFromUrl
-      callback = () => {
-        replaceContent(div, img);
-        div.dataset.color = '';
-      };
-    } else {
-      const animate = rootScope.settings.animationsEnabled;
-      if(animate) {
-        img.classList.add('fade-in');
-      }
-
-      callback = () => {
-        replaceContent(div, img);
-
-        setTimeout(() => {
-          if(div.childElementCount) {
-            div.dataset.color = '';
-
-            if(animate) {
-              sequentialDom.mutateElement(img, () => {
-                img.classList.remove('fade-in');
-              });
-            }
-          }
-        }, animate ? 200 : 0);
-      };
-    }
-
-    const renderPromise = loadPromise.then((url) => {
-      /* if(photo.stripped_thumb) {
-        url = appPhotosManager.getPreviewURLFromBytes(photo.stripped_thumb);
-      } */
-
-      return new Promise<void>((resolve) => {
-        renderImageFromUrl(img, url, () => {
-          callback();
-          resolve();
-        }/* , false */);
-      });
+  public deletePhotos(photoIds: string[]) {
+    return apiManager.invokeApiSingle('photos.deletePhotos', {
+      id: photoIds.map(photoId => {
+        const photo = appPhotosManager.getPhoto(photoId);
+        return appPhotosManager.getInput(photo);
+      })
+    }).then((deletedList) => {
+      
     });
-
-    return {cached, loadPromise: renderPromise};
   }
 
-  // peerId === peerId || title
-  public putPhoto(div: HTMLElement, peerId: number, isDialog = false, title = '') {
-    const photo = appPeersManager.getPeerPhoto(peerId);
+  public getChatMembersString(chatId: ChatId) {
+    const chat: Chat = appChatsManager.getChat(chatId);
+    if(chat._ === 'chatForbidden') {
+      return i18n('YouWereKicked');
+    }
 
-    const size: PeerPhotoSize = 'photo_small';
-    const avatarAvailable = !!photo;
-    const avatarRendered = div.firstElementChild && !(div.firstElementChild as HTMLElement).classList.contains('emoji');
+    const chatFull = this.chatsFull[chatId];
+    let count: number;
+    if(chatFull) {
+      if(chatFull._ === 'channelFull') {
+        count = chatFull.participants_count;
+      } else {
+        count = (chatFull.participants as ChatParticipants.chatParticipants).participants?.length;
+      }
+    } else {
+      count = (chat as Chat.chat).participants_count || (chat as any).participants?.participants.length;
+    }
+
+    const isChannel = appChatsManager.isBroadcast(chatId);
+    count = count || 1;
+
+    let key: LangPackKey = isChannel ? 'Peer.Status.Subscribers' : 'Peer.Status.Member';
+    return i18n(key, [numberThousandSplitter(count)]);
+  }
+
+  private verifyParticipantForOnlineCount(participant: {user_id: UserId}) {
+    const user = appUsersManager.getUser(participant.user_id);
+    return !!(user && user.status && user.status._ === 'userStatusOnline');
+  }
+
+  private reduceParticipantsForOnlineCount(participants: {user_id: UserId}[]) {
+    return participants.reduce((acc, participant) => {
+      return acc + +this.verifyParticipantForOnlineCount(participant);
+    }, 0);
+  }
+
+  public async getOnlines(id: ChatId): Promise<number> {
+    const minOnline = 1;
+    if(appChatsManager.isBroadcast(id)) {
+      return minOnline;
+    }
     
-    const myId = rootScope.myId;
+    const chatInfo = await this.getChatFull(id);
+    if(appChatsManager.isMegagroup(id)) {
+      if((chatInfo as ChatFull.channelFull).participants_count <= 100) {
+        const channelParticipants = await this.getChannelParticipants(id, {_: 'channelParticipantsRecent'}, 100);
+        return this.reduceParticipantsForOnlineCount(channelParticipants.participants as ChannelParticipant.channelParticipant[]);
+      }
 
-    //console.log('loadDialogPhoto location:', location, inputPeer);
-    if(peerId === myId && isDialog) {
-      div.innerText = '';
-      div.dataset.color = '';
-      div.classList.add('tgico-saved');
-      div.classList.remove('tgico-deletedaccount');
+      const res = await apiManager.invokeApiCacheable('messages.getOnlines', {
+        peer: appChatsManager.getChannelInputPeer(id)
+      }, {cacheSeconds: 60});
+
+      const onlines = res.onlines ?? minOnline;
+      return onlines;
+    }
+
+    const _participants = (chatInfo as ChatFull.chatFull).participants as ChatParticipants.chatParticipants;
+    if(_participants?.participants) {
+      return this.reduceParticipantsForOnlineCount(_participants.participants);
+    } else {
+      return minOnline;
+    }
+  }
+
+  private onUpdateUserTyping = (update: Update.updateUserTyping | Update.updateChatUserTyping | Update.updateChannelUserTyping) => {
+    const fromId = (update as Update.updateUserTyping).user_id ? 
+      (update as Update.updateUserTyping).user_id.toPeerId() : 
+      appPeersManager.getPeerId((update as Update.updateChatUserTyping).from_id);
+    if(rootScope.myId === fromId || update.action._ === 'speakingInGroupCallAction') {
+      return;
+    }
+    
+    const peerId = appPeersManager.getPeerId(update);
+    const typings = this.typingsInPeer[peerId] ?? (this.typingsInPeer[peerId] = []);
+    let typing = typings.find(t => t.userId === fromId);
+
+    const cancelAction = () => {
+      delete typing.timeout;
+      //typings.findAndSplice(t => t === typing);
+      const idx = typings.indexOf(typing);
+      if(idx !== -1) {
+        typings.splice(idx, 1);
+      }
+
+      rootScope.dispatchEvent('peer_typings', {peerId, typings});
+
+      if(!typings.length) {
+        delete this.typingsInPeer[peerId];
+      }
+    };
+
+    if(typing && typing.timeout !== undefined) {
+      clearTimeout(typing.timeout);
+    }
+
+    if(update.action._ === 'sendMessageCancelAction') {
+      if(!typing) {
+        return;
+      }
+
+      cancelAction();
       return;
     }
 
-    if(peerId > 0) {
-      const user = appUsersManager.getUser(peerId);
-      if(user && user.pFlags && user.pFlags.deleted) {
-        div.innerText = '';
-        div.dataset.color = appPeersManager.getPeerColorById(peerId);
-        div.classList.add('tgico-deletedaccount');
-        div.classList.remove('tgico-saved');
-        return;
-      }
+    if(!typing) {
+      typing = {
+        userId: fromId
+      };
+
+      typings.push(typing);
     }
 
-    if(!avatarAvailable || !avatarRendered || !this.savedAvatarURLs[peerId]) {
-      let color = '';
-      if(peerId && (peerId !== myId || !isDialog)) {
-        color = appPeersManager.getPeerColorById(peerId);
+    //console.log('updateChatUserTyping', update, typings);
+    
+    typing.action = update.action;
+    
+    const hasUser = appUsersManager.hasUser(fromId);
+    if(!hasUser) {
+      // let's load user here
+      if(update._ === 'updateChatUserTyping') {
+        if(update.chat_id && appChatsManager.hasChat(update.chat_id) && !appChatsManager.isChannel(update.chat_id)) {
+          Promise.resolve(this.getChatFull(update.chat_id)).then(() => {
+            if(typing.timeout !== undefined && appUsersManager.hasUser(fromId)) {
+              rootScope.dispatchEvent('peer_typings', {peerId, typings});
+            }
+          });
+        }
       }
       
-      div.innerText = '';
-      div.classList.remove('tgico-saved', 'tgico-deletedaccount');
-      div.dataset.color = color;
+      //return;
+    } else {
+      appUsersManager.forceUserOnline(fromId);
+    }
 
-      let abbr: string;
-      if(!title) {
-        const peer = appPeersManager.getPeer(peerId);
-        abbr = peer.initials ?? '';
-      } else {
-        abbr = RichTextProcessor.getAbbreviation(title);
+    typing.timeout = window.setTimeout(cancelAction, 6000);
+    if(hasUser) {
+      rootScope.dispatchEvent('peer_typings', {peerId, typings});
+    }
+  };
+
+  private onUpdatePeerBlocked = (update: Update.updatePeerBlocked) => {
+    const peerId = appPeersManager.getPeerId(update.peer_id);
+    if(appPeersManager.isUser(peerId)) {
+      const userId = peerId.toUserId();
+      const userFull = this.usersFull[userId];
+      if(userFull) {
+        if(update.blocked) userFull.pFlags.blocked = true;
+        else delete userFull.pFlags.blocked;
       }
 
-      div.innerHTML = abbr;
-      //return Promise.resolve(true);
+      rootScope.dispatchEvent('user_full_update', userId);
     }
 
-    if(avatarAvailable/*  && false */) {
-      return this.putAvatar(div, peerId, photo, size);
-    }
+    rootScope.dispatchEvent('peer_block', {peerId, blocked: update.blocked});
+  };
+
+  public getPeerTypings(peerId: PeerId) {
+    return this.typingsInPeer[peerId];
   }
 }
 

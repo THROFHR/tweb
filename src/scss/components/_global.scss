@@ -96,7 +96,11 @@ Utility Classes
 }
 
 .no-transition {
-  transition: none !important;
+  &,
+  &:before,
+  &:after {
+    transition: none !important;
+  }
 
   /* &-all, &-all * {
     transition: none !important;
@@ -110,6 +114,10 @@ Utility Classes
 .center-align, .text-center {
   text-align: center;
 }
+
+/* .reset-align {
+  text-align: unset;
+} */
 
 .justify-start {
   justify-content: flex-start!important;
@@ -145,6 +153,15 @@ Utility Classes
 
 .pre-wrap {
   white-space: pre-wrap !important;
+}
+
+.no-border-radius {
+  border-radius: 0 !important;
+}
+
+.disable-hover/* ,
+.disable-hover * */ {
+  pointer-events: none !important;
 }
 
 /* .flex-grow {

@@ -4,9 +4,8 @@
  * https://github.com/morethanwords/tweb/blob/master/LICENSE
  */
 
-import { formatPhoneNumber, putPreloader } from "../components/misc";
+import { putPreloader } from "../components/misc";
 import Scrollable from '../components/scrollable';
-import Countries, { Country as _Country } from "../countries";
 import appStateManager from "../lib/appManagers/appStateManager";
 import apiManager from "../lib/mtproto/mtprotoworker";
 import { RichTextProcessor } from '../lib/richtextprocessor';
@@ -14,14 +13,12 @@ import Page from "./page";
 import InputField from "../components/inputField";
 import CheckboxField from "../components/checkboxField";
 import Button from "../components/button";
-import { isAppleMobile } from "../helpers/userAgent";
 import fastSmoothScroll from "../helpers/fastSmoothScroll";
-import { isTouchSupported } from "../helpers/touchSupport";
+import { IS_TOUCH_SUPPORTED } from "../environment/touchSupport";
 import App from "../config/app";
-import Modes from "../config/modes";
-import { _i18n, i18n } from "../lib/langPack";
-import lottieLoader from "../lib/lottieLoader";
-import { ripple } from "../components/ripple";
+import I18n, { _i18n, i18n } from "../lib/langPack";
+import lottieLoader from "../lib/rlottie/lottieLoader";
+import ripple from "../components/ripple";
 import findUpTag from "../helpers/dom/findUpTag";
 import findUpClassName from "../helpers/dom/findUpClassName";
 import { randomLong } from "../helpers/random";
@@ -29,49 +26,73 @@ import AppStorage from "../lib/storage";
 import CacheStorageController from "../lib/cacheStorage";
 import pageSignQR from "./pageSignQR";
 import getLanguageChangeButton from "../components/languageChangeButton";
-import { cancelEvent } from "../helpers/dom/cancelEvent";
+import cancelEvent from "../helpers/dom/cancelEvent";
 import { attachClickEvent } from "../helpers/dom/clickEvent";
 import replaceContent from "../helpers/dom/replaceContent";
 import toggleDisability from "../helpers/dom/toggleDisability";
-
-type Country = _Country & {
-  li?: HTMLLIElement[]
-};
+import sessionStorage from "../lib/sessionStorage";
+import { DcAuthKey } from "../types";
+import placeCaretAtEnd from "../helpers/dom/placeCaretAtEnd";
+import { HelpCountry, HelpCountryCode } from "../layer";
+import { getCountryEmoji } from "../vendor/emoji";
+import simulateEvent from "../helpers/dom/dispatchEvent";
+import stateStorage from "../lib/stateStorage";
+import rootScope from "../lib/rootScope";
+import TelInputField from "../components/telInputField";
+import IS_EMOJI_SUPPORTED from "../environment/emojiSupport";
+import setInnerHTML from "../helpers/dom/setInnerHTML";
 
 //import _countries from '../countries_pretty.json';
 let btnNext: HTMLButtonElement = null, btnQr: HTMLButtonElement;
 
 let onFirstMount = () => {
-  if(Modes.test) {
+  /* if(Modes.test) {
     Countries.push({
-      name: 'Test Country',
-      phoneCode: '999 66',
-      code: 'TC',
-      emoji: '🤔',
-      pattern: '999 66 XXX XX'
+      _: 'help.country',
+      default_name: 'Test Country',
+      country_codes: [{
+        _: 'help.countryCode',
+        country_code: '999 66',
+        patterns: ['999 66 XXX XX']
+      }],
+      iso2: 'KK'
     });
   
     console.log('Added test country to list!');
-  }
+  } */
 
   //const countries: Country[] = _countries.default.filter(c => c.emoji);
-  const countries: Country[] = Countries.filter(c => c.emoji).sort((a, b) => a.name.localeCompare(b.name));
+  // const countries: Country[] = Countries.filter(c => c.emoji).sort((a, b) => a.name.localeCompare(b.name));
+  // const countries = I18n.countriesList.filter(country => !country.pFlags?.hidden);
+  const setCountries = () => {
+    countries = I18n.countriesList
+    .filter(country => !country.pFlags?.hidden)
+    .sort((a, b) => (a.name || a.default_name).localeCompare(b.name || b.default_name));
+  };
+  let countries: HelpCountry.helpCountry[]; 
 
-  let lastCountrySelected: Country = null;
+  setCountries();
+
+  rootScope.addEventListener('language_change', () => {
+    setCountries();
+  });
+
+  const liMap: Map<string, HTMLLIElement[]> = new Map();
+
+  let lastCountrySelected: HelpCountry, lastCountryCodeSelected: HelpCountryCode;
 
   const inputWrapper = document.createElement('div');
   inputWrapper.classList.add('input-wrapper');
 
   const countryInputField = new InputField({
     label: 'Login.CountrySelectorLabel',
-    name: randomLong(),
-    plainText: true
+    name: randomLong()
   });
 
   countryInputField.container.classList.add('input-select');
 
-  const countryInput = countryInputField.input as HTMLInputElement;
-  countryInput.autocomplete = randomLong();
+  const countryInput = countryInputField.input;
+  // countryInput.autocomplete = randomLong();
 
   const selectWrapper = document.createElement('div');
   selectWrapper.classList.add('select-wrapper', 'z-depth-3', 'hide');
@@ -89,30 +110,35 @@ let onFirstMount = () => {
     initSelect = null;
 
     countries.forEach((c) => {
-      const emoji = c.emoji;
+      const emoji = getCountryEmoji(c.iso2);
 
       const liArr: Array<HTMLLIElement> = [];
-      c.phoneCode.split(' and ').forEach((phoneCode: string) => {
+      c.country_codes.forEach((countryCode) => {
         const li = document.createElement('li');
-        const spanEmoji = document.createElement('span');
 
-        const kek = RichTextProcessor.wrapRichText(emoji);
-
-        li.appendChild(spanEmoji);
-        spanEmoji.outerHTML = kek;
-  
-        li.append(c.name);
+        let wrapped = RichTextProcessor.wrapEmojiText(emoji);
+        if(IS_EMOJI_SUPPORTED) {
+          const spanEmoji = document.createElement('span');
+          setInnerHTML(spanEmoji, wrapped);
+          li.append(spanEmoji);
+        } else {
+          setInnerHTML(li, wrapped);
+        }
+        
+        const el = i18n(c.default_name as any);
+        el.dataset.defaultName = c.default_name;
+        li.append(el);
 
         const span = document.createElement('span');
         span.classList.add('phone-code');
-        span.innerText = '+' + phoneCode;
+        span.innerText = '+' + countryCode.country_code;
         li.appendChild(span);
 
         liArr.push(li);
         selectList.append(li);
       });
 
-      c.li = liArr;
+      liMap.set(c.iso2, liArr);
     });
     
     selectList.addEventListener('mousedown', (e) => {
@@ -120,9 +146,7 @@ let onFirstMount = () => {
         return;
       }
       
-      let target = e.target as HTMLElement;
-      if(target.tagName !== 'LI') target = findUpTag(target, 'LI');
-      
+      const target = findUpTag(e.target, 'LI')
       selectCountryByTarget(target);
       //console.log('clicked', e, countryName, phoneCode);
     });
@@ -131,15 +155,21 @@ let onFirstMount = () => {
   };
 
   const selectCountryByTarget = (target: HTMLElement) => {
-    const countryName = target.childNodes[1].textContent;//target.innerText.split('\n').shift();
+    const defaultName = (target.childNodes[1] as HTMLElement).dataset.defaultName;
     const phoneCode = target.querySelector<HTMLElement>('.phone-code').innerText;
+    const countryCode = phoneCode.replace(/\D/g, '');
 
-    countryInput.value = countryName;
-    lastCountrySelected = countries.find(c => c.name === countryName);
+    replaceContent(countryInput, i18n(defaultName as any));
+    simulateEvent(countryInput, 'input');
+    lastCountrySelected = countries.find(c => c.default_name === defaultName);
+    lastCountryCodeSelected = lastCountrySelected.country_codes.find(_countryCode => _countryCode.country_code === countryCode);
     
-    telEl.value = lastValue = phoneCode;
+    telInputField.value = telInputField.lastValue = phoneCode;
     hidePicker();
-    setTimeout(() => telEl.focus(), 0);
+    setTimeout(() => {
+      telEl.focus();
+      placeCaretAtEnd(telEl, true);
+    }, 0);
   };
   
   initSelect();
@@ -151,7 +181,7 @@ let onFirstMount = () => {
       initSelect();
     } else {
       countries.forEach((c) => {
-        c.li.forEach(li => li.style.display = '');
+        liMap.get(c.iso2).forEach(li => li.style.display = '');
       });
     }
 
@@ -164,7 +194,12 @@ let onFirstMount = () => {
 
     countryInputField.select();
 
-    fastSmoothScroll(page.pageEl.parentElement.parentElement, countryInput, 'start', 4);
+    fastSmoothScroll({
+      container: page.pageEl.parentElement.parentElement, 
+      element: countryInput, 
+      position: 'start', 
+      margin: 4
+    });
 
     setTimeout(() => {
       if(!mouseDownHandlerAttached) {
@@ -202,16 +237,30 @@ let onFirstMount = () => {
     e.cancelBubble = true;
   }, {capture: true}); */
 
-  countryInput.addEventListener('keyup', function(this: typeof countryInput, e) {
-    if(e.ctrlKey || e.key === 'Control') return false;
+  countryInput.addEventListener('keyup', (e) => {
+    const key = e.key;
+    if(e.ctrlKey || key === 'Control') return false;
 
     //let i = new RegExp('^' + this.value, 'i');
-    let _value = this.value.toLowerCase();
-    let matches: Country[] = [];
+    let _value = countryInputField.value.toLowerCase();
+    let matches: HelpCountry[] = [];
     countries.forEach((c) => {
-      let good = c.name.toLowerCase().indexOf(_value) !== -1/*  === 0 */;//i.test(c.name);
+      const names = [
+        c.name, 
+        c.default_name,
+        c.iso2
+      ];
 
-      c.li.forEach(li => li.style.display = good ? '' : 'none');
+      names.filter(Boolean).forEach(name => {
+        const abbr = name.split(' ').filter(word => /\w/.test(word)).map(word => word[0]).join('');
+        if(abbr.length > 1) {
+          names.push(abbr);
+        }
+      });
+
+      let good = !!names.filter(Boolean).find(str => str.toLowerCase().indexOf(_value) !== -1)/*  === 0 */;//i.test(c.name);
+
+      liMap.get(c.iso2).forEach(li => li.style.display = good ? '' : 'none');
       if(good) matches.push(c);
     });
 
@@ -226,10 +275,10 @@ let onFirstMount = () => {
       return false;
     } else  */if(matches.length === 0) {
       countries.forEach((c) => {
-        c.li.forEach(li => li.style.display = '');
+        liMap.get(c.iso2).forEach(li => li.style.display = '');
       });
-    } else if(matches.length === 1 && e.key === 'Enter') {
-      selectCountryByTarget(matches[0].li[0]);
+    } else if(matches.length === 1 && key === 'Enter') {
+      selectCountryByTarget(liMap.get(matches[0].iso2)[0]);
     }
   });
 
@@ -240,75 +289,41 @@ let onFirstMount = () => {
     else countryInput.focus();
   });
 
-  let pasted = false;
-  let lastValue = '';
+  const telInputField = new TelInputField({
+    onInput: (formatted) => {
+      lottieLoader.loadLottieWorkers();
+
+      const {country, code} = formatted || {};
+      let countryName = country ? country.name || country.default_name : ''/* 'Unknown' */;
+      if(countryName !== countryInputField.value && (
+          !lastCountrySelected || 
+          !country ||
+          !code || (
+            lastCountrySelected !== country && 
+            lastCountryCodeSelected.country_code !== code.country_code
+          )
+        )
+      ) {
+        replaceContent(countryInput, country ? i18n(country.default_name as any) : countryName);
+        lastCountrySelected = country;
+        lastCountryCodeSelected = code;
+      }
   
-  const telInputField = new InputField({
-    label: 'Login.PhoneLabel',
-    plainText: true,
-    name: 'phone'
-  });
-  let telEl = telInputField.input as HTMLInputElement;
-  telEl.type = 'tel';
-  telEl.autocomplete = 'rr55RandomRR55';
-  telEl.addEventListener('input', function(this: typeof telEl, e) {
-    //console.log('input', this.value);
-    this.classList.remove('error');
-
-    lottieLoader.loadLottieWorkers();
-
-    const value = this.value;
-    const diff = Math.abs(value.length - lastValue.length);
-    if(diff > 1 && !pasted && isAppleMobile) {
-      this.value = lastValue + value;
-    }
-
-    pasted = false;
-
-    telInputField.setLabel();
-
-    let formatted: string, country: Country;
-    if(this.value.replace(/\++/, '+') === '+') {
-      this.value = '+';
-    } else {
-      const o = formatPhoneNumber(this.value);
-      formatted = o.formatted;
-      country = o.country;
-      this.value = lastValue = formatted ? '+' + formatted : '';
-    }
-
-    //console.log(formatted, country);
-
-    let countryName = country ? country.name : ''/* 'Unknown' */;
-    if(countryName !== countryInput.value && (!lastCountrySelected || !country || lastCountrySelected.phoneCode !== country.phoneCode)) {
-      countryInput.value = countryName;
-      lastCountrySelected = country;
-    }
-
-    //if(country && (this.value.length - 1) >= (country.pattern ? country.pattern.length : 9)) {
-    if(country || (this.value.length - 1) > 1) {
-      btnNext.style.visibility = '';
-    } else {
-      btnNext.style.visibility = 'hidden';
+      //if(country && (telInputField.value.length - 1) >= (country.pattern ? country.pattern.length : 9)) {
+      if(country || (telInputField.value.length - 1) > 1) {
+        btnNext.style.visibility = '';
+      } else {
+        btnNext.style.visibility = 'hidden';
+      }
     }
   });
 
-  telEl.addEventListener('paste', (e) => {
-    pasted = true;
-    //console.log('paste', telEl.value);
-  });
+  const telEl = telInputField.input;
 
-  /* telEl.addEventListener('change', (e) => {
-    console.log('change', telEl.value);
-  }); */
-
-  telEl.addEventListener('keypress', function(this: typeof telEl, e) {
+  telEl.addEventListener('keypress', (e) => {
     //console.log('keypress', this.value);
     if(!btnNext.style.visibility &&/* this.value.length >= 9 && */ e.key === 'Enter') {
       return onSubmit();
-    } else if(/\D/.test(e.key) && !(e.metaKey || e.ctrlKey) && !(e.key === '+' && e.shiftKey/*  && !this.value */)) {
-      e.preventDefault();
-      return false;
     }
   });
 
@@ -319,7 +334,8 @@ let onFirstMount = () => {
   const signedCheckboxField = new CheckboxField({
     text: 'Login.KeepSigned', 
     name: 'keepSession',
-    withRipple: true
+    withRipple: true,
+    checked: true
   });
 
   signedCheckboxField.input.addEventListener('change', () => {
@@ -329,6 +345,7 @@ let onFirstMount = () => {
     AppStorage.toggleStorage(keepSigned);
     CacheStorageController.toggleStorage(keepSigned);
     apiManager.toggleStorage(keepSigned);
+    sessionStorage.toggleStorage(keepSigned);
   });
 
   appStateManager.getState().then(state => {
@@ -355,7 +372,7 @@ let onFirstMount = () => {
 
     //return;
 
-    let phone_number = telEl.value;
+    let phone_number = telInputField.value;
     apiManager.invokeApi('auth.sendCode', {
       phone_number: phone_number,
       api_id: App.id,
@@ -417,34 +434,53 @@ let onFirstMount = () => {
   inputWrapper.append(countryInputField.container, telInputField.container, signedCheckboxField.label, btnNext, btnQr);
 
   const h4 = document.createElement('h4');
+  h4.classList.add('text-center');
   _i18n(h4, 'Login.Title');
 
   const subtitle = document.createElement('div');
-  subtitle.classList.add('subtitle');
+  subtitle.classList.add('subtitle', 'text-center');
   _i18n(subtitle, 'Login.StartText');
 
   page.pageEl.querySelector('.container').append(h4, subtitle, inputWrapper);
 
   let tryAgain = () => {
     apiManager.invokeApi('help.getNearestDc').then((nearestDcResult) => {
-      const dcs = [1, 2, 3, 4, 5];
+      const langPack = stateStorage.getFromCache('langPack');
+      if(langPack && !langPack.countries?.hash) {
+        I18n.getLangPack(langPack.lang_code).then(() => {
+          simulateEvent(telEl, 'input');
+        });
+      }
+
+      const dcs = new Set([1, 2, 3, 4, 5]);
       const done: number[] = [nearestDcResult.this_dc];
 
       let promise: Promise<any>;
       if(nearestDcResult.nearest_dc !== nearestDcResult.this_dc) {
         promise = apiManager.getNetworker(nearestDcResult.nearest_dc).then(() => {
-          done.push(nearestDcResult.nearest_dc)
+          done.push(nearestDcResult.nearest_dc);
         });
       }
 
       (promise || Promise.resolve()).then(() => {
-        const g = () => {
-          const dcId = dcs.shift();
+        done.forEach(dcId => {
+          dcs.delete(dcId);
+        });
+
+        const _dcs = [...dcs];
+        const g = async(): Promise<void> => {
+          const dcId = _dcs.shift();
           if(!dcId) return;
 
+          const dbKey: DcAuthKey = `dc${dcId}_auth_key` as any;
+          const key = await sessionStorage.get(dbKey);
+          if(key) {
+            return g();
+          }
+
           setTimeout(() => { // * если одновременно запросить все нетворкеры, не будет проходить запрос на код
-            apiManager.getNetworker(dcId, {fileDownload: true}).finally(g);
-          }, done.includes(dcId) ? 0 : 3000);
+            apiManager.getNetworker(dcId/* , {fileDownload: true} */).finally(g);
+          }, /* done.includes(dcId) ? 0 :  */3000);
         };
         
         g();
@@ -452,20 +488,15 @@ let onFirstMount = () => {
       
       return nearestDcResult;
     }).then((nearestDcResult) => {
-      let country = countries.find((c) => c.code === nearestDcResult.country);
-      if(country) {
-        if(!countryInput.value.length && !telEl.value.length) {
-          countryInput.value = country.name;
-          lastCountrySelected = country;
-          telEl.value = lastValue = '+' + country.phoneCode.split(' and ').shift();
-        }
+      if(!countryInputField.value.length && !telInputField.value.length) {
+        selectCountryByTarget(liMap.get(nearestDcResult.country)[0]);
       }
   
       //console.log('woohoo', nearestDcResult, country);
     })//.catch(tryAgain);
   };
 
-  if(!isTouchSupported) {
+  if(!IS_TOUCH_SUPPORTED) {
     setTimeout(() => {
       telEl.focus();
     }, 0);

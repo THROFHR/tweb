@@ -41,6 +41,7 @@ html:not(.is-safari):not(.is-ios) {
     max-height: 12.5rem;
     border-radius: $border-radius-medium;
     background-color: var(--scrollbar-color);
+    backdrop-filter: blur(100);
     opacity: 1;
   }
 }
@@ -66,7 +67,7 @@ html:not(.is-safari):not(.is-ios) {
   overflow-y: hidden;
   overflow-x: hidden;
   max-height: 100%;
-  transform: translateZ(0);
+  // transform: translateZ(0);
 
   //@include respond-to(not-handhelds) {
     position: absolute;
@@ -80,15 +81,16 @@ html:not(.is-safari):not(.is-ios) {
 
   &.scrollable-x {
     overflow-x: auto;
-    scrollbar-width: none;
+    scrollbar-width: thin; // Firefox only
     -ms-overflow-style: none;
   }
 
   &.scrollable-y {
     overflow-y: auto;
     overflow-y: overlay;
-    scrollbar-width: none;
+    scrollbar-width: thin; // Firefox only
     -ms-overflow-style: none;
+    transform: translateZ(0);
 
     /* html.is-safari & {
       overflow-y: scroll;

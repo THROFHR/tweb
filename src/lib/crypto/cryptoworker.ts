@@ -9,8 +9,24 @@
  * https://github.com/zhukov/webogram/blob/master/LICENSE
  */
 
-import { MOUNT_CLASS_TO } from '../../config/debug';
-import CryptoWorkerMethods from './crypto_methods';
+// import { MOUNT_CLASS_TO } from '../../config/debug';
+import CryptoWorkerMethods, { CryptoMethods } from './crypto_methods';
+
+/// #if MTPROTO_WORKER
+import gzipUncompress from '../../helpers/gzipUncompress';
+import bytesModPow from '../../helpers/bytes/bytesModPow';
+import computeSRP from './srp';
+import { aesEncryptSync, aesDecryptSync } from './utils/aesIGE';
+import pbkdf2 from './utils/pbkdf2';
+import rsaEncrypt from './utils/rsa';
+import sha1 from './utils/sha1';
+import sha256 from './utils/sha256';
+import factorizeBrentPollardPQ from './utils/factorize/BrentPollard';
+import generateDh from './generateDh';
+import computeDhKey from './computeDhKey';
+import getEmojisFingerprint from '../calls/helpers/getEmojisFingerprint';
+// import factorizeTdlibPQ from './utils/factorize/tdlib';
+/// #endif
 
 type Task = {
   taskId: number,
@@ -31,36 +47,54 @@ class CryptoWorker extends CryptoWorkerMethods {
   private pending: Array<Task> = [];
   private debug = false;
 
-  private utils: {[name: string]: (...args: any[]) => any} = {};
+  private utils: CryptoMethods;
 
   constructor() {
     super();
     console.log('CW constructor');
 
     /// #if MTPROTO_WORKER
-    Promise.all([
-      import('./crypto_utils').then(utils => {
-        Object.assign(this.utils, {
-          'sha1-hash': utils.sha1HashSync,
-          'sha256-hash': utils.sha256HashSync,
-          'pbkdf2': utils.hash_pbkdf2,
-          'aes-encrypt': utils.aesEncryptSync,
-          'aes-decrypt': utils.aesDecryptSync,
-          'rsa-encrypt': utils.rsaEncrypt,
-          'factorize': utils.pqPrimeFactorization,
-          'mod-pow': utils.bytesModPow,
-          'gzipUncompress': utils.gzipUncompress,
-        });
-      }),
+    this.utils = {
+      'sha1': sha1,
+      'sha256': sha256,
+      'pbkdf2': pbkdf2,
+      'aes-encrypt': aesEncryptSync,
+      'aes-decrypt': aesDecryptSync,
+      'rsa-encrypt': rsaEncrypt,
+      'factorize': factorizeBrentPollardPQ,
+      // 'factorize-tdlib': factorizeTdlibPQ, 
+      // 'factorize-new-new': pqPrimeLeemonNew, 
+      'mod-pow': bytesModPow,
+      'gzipUncompress': gzipUncompress,
+      'computeSRP': computeSRP,
+      'generate-dh': generateDh,
+      'compute-dh-key': computeDhKey,
+      'get-emojis-fingerprint': getEmojisFingerprint
+    };
 
-      import('./srp').then(srp => {
-        this.utils.computeSRP = srp.computeSRP;
-      })/* ,
+    // Promise.all([
+    //   import('./crypto_utils').then(utils => {
+    //     Object.assign(this.utils, {
+    //       'sha1-hash': utils.sha1HashSync,
+    //       'sha256-hash': utils.sha256HashSync,
+    //       'pbkdf2': utils.hash_pbkdf2,
+    //       'aes-encrypt': utils.aesEncryptSync,
+    //       'aes-decrypt': utils.aesDecryptSync,
+    //       'rsa-encrypt': utils.rsaEncrypt,
+    //       'factorize': utils.pqPrimeFactorization,
+    //       'mod-pow': utils.bytesModPow,
+    //       'gzipUncompress': utils.gzipUncompress,
+    //     });
+    //   }),
 
-      import('../bin_utils').then(utils => {
-        this.utils.unzip = utils.gzipUncompress;
-      }) */
-    ]);
+    //   import('./srp').then(srp => {
+    //     this.utils.computeSRP = srp.computeSRP;
+    //   })/* ,
+
+    //   import('../bin_utils').then(utils => {
+    //     this.utils.unzip = utils.gzipUncompress;
+    //   }) */
+    // ]);
 
     return;
     /// #else
@@ -102,6 +136,7 @@ class CryptoWorker extends CryptoWorkerMethods {
     this.debug && console.log('CW start', task, args);
 
     /// #if MTPROTO_WORKER
+    // @ts-ignore
     return Promise.resolve<T>(this.utils[task](...args));
     /// #else
     return new Promise<T>((resolve, reject) => {
@@ -136,5 +171,5 @@ class CryptoWorker extends CryptoWorkerMethods {
 }
 
 const cryptoWorker = new CryptoWorker();
-MOUNT_CLASS_TO.CryptoWorker = cryptoWorker;
+// MOUNT_CLASS_TO.CryptoWorker = cryptoWorker;
 export default cryptoWorker;

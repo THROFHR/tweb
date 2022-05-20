@@ -74,7 +74,7 @@ export default class AppSearch {
 
   private listsContainer: HTMLDivElement = null;
 
-  private peerId = 0; // 0 - means global
+  private peerId: PeerId; // 0 - means global
   private threadId = 0;
 
   private scrollable: Scrollable;
@@ -117,7 +117,7 @@ export default class AppSearch {
     if(all) {
       this.searchInput.value = '';
       this.query = '';
-      this.peerId = 0;
+      this.peerId = undefined;
       this.threadId = 0;
     }
 
@@ -132,9 +132,14 @@ export default class AppSearch {
     this.searchPromise = null;
   }
 
-  public beginSearch(peerId = 0, threadId = 0) {
+  public beginSearch(peerId?: PeerId, threadId = 0, query = '') {
     this.peerId = peerId;
     this.threadId = threadId;
+
+    if(this.query !== query) {
+      this.searchInput.inputField.value = query;
+    }
+
     this.searchInput.input.focus();
   }
 
@@ -179,20 +184,20 @@ export default class AppSearch {
       const searchGroup = this.searchGroups.messages;
 
       history.forEach((message) => {
-        const peerId = this.peerId ? message.fromId : message.peerId;
-        const {dialog, dom} = appDialogsManager.addDialogNew({
-          dialog: peerId, 
-          container: this.scrollable/* searchGroup.list */, 
-          drawStatus: false,
-          avatarSize: 54,
-          meAsSaved: false
-        });
-
-        if(message.peerId !== peerId) {
-          dom.listEl.dataset.peerId = '' + message.peerId;
+        try {
+          const peerId = this.peerId ? message.fromId : message.peerId;
+          appDialogsManager.addDialogAndSetLastMessage({
+            peerId, 
+            container: this.scrollable/* searchGroup.list */, 
+            drawStatus: false,
+            avatarSize: 54,
+            meAsSaved: false,
+            message,
+            query
+          });
+        } catch(err) {
+          console.error('[appSearch] render search result', err);
         }
-
-        appDialogsManager.setLastMessage(dialog, message, dom, query);
       });
 
       searchGroup.toggle();

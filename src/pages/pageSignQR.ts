@@ -26,6 +26,9 @@ let onFirstMount = async() => {
 
   let preloader = putPreloader(imageDiv, true);
 
+  const imageTextDiv = document.createElement('div');
+  imageDiv.parentElement.append(imageTextDiv);
+
   const inputWrapper = document.createElement('div');
   inputWrapper.classList.add('input-wrapper');
 
@@ -104,7 +107,7 @@ let onFirstMount = async() => {
 
         let encoded = bytesToBase64(loginToken.token);
         let url = "tg://login?token=" + encoded.replace(/\+/g, "-").replace(/\//g, "_").replace(/\=+$/, "");
-
+        imageTextDiv.innerText = url;
         const style = window.getComputedStyle(document.documentElement);
         const surfaceColor = style.getPropertyValue('--surface-color').trim();
         const textColor = style.getPropertyValue('--primary-text-color').trim();
